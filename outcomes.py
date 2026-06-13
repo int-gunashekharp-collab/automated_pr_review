@@ -126,3 +126,20 @@ def mine_outcomes(run_gh=None) -> dict:
                 stats[f"new_{clf['outcome']}"] += 1
 
     return stats
+
+def load_outcomes() -> dict[str, list[dict]]:
+    res = {'acted_on': [], 'dismissed': []}
+    f = _get_outcomes_file()
+    if not f.exists():
+        return res
+    for line in f.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+            outcome = rec.get('outcome')
+            if outcome in res:
+                res[outcome].append(rec)
+        except Exception:
+            pass
+    return res

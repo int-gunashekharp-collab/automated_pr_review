@@ -33,3 +33,8 @@ smoke: GREEN after iteration 1
 iter 1 S1: GREEN — partial slice kept. Implemented outcomes.py core logic and offline tests. Kept 'done' false because wiring `--mine-outcomes` into `loop.py` requires editing its `argparse` block in `main()`. Rather than risking a 37KB rewrite of `loop.py` in this single-shot iteration, I deferred the CLI wiring. Next iteration should edit `loop.py` to add `--mine-outcomes` and mark the story done. Smoke is fully green.
 smoke: GREEN after iteration 2
 iter 2 S1: GREEN — story DONE. Added --mine-outcomes to loop.py CLI. Appended CLI test to smoke_test.py. Story S1 fully complete.
+iter 3 S2: brain proposed no files — skipped
+iter 4 S2: brain proposed no files — skipped
+iter 5 S2: brain proposed no files — skipped
+smoke: GREEN after iteration 1
+iter 1 S2: GREEN — story DONE. Wired the output from `mine_outcomes` directly into the proposer's contexts. Smoke test validates that when LOOP_OUTCOMES=1, the stub strings correctly make it to the prompt. Iteration DONE.

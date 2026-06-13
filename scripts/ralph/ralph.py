@@ -14,16 +14,18 @@ What it is (and is NOT):
     the two stay distinct in WHAT they optimise (code vs. rubric) but share
     infrastructure. (See MEMORY.md turn 11b.)
 
-Per iteration:
+Per iteration (up to MAX_ATTEMPTS tries, feeding each failure back to the model):
   1. maestro guard — abort (actionably) if maestro-core has uncommitted changes.
   2. pick the highest-priority story with passes=false.
-  3. ask the Vertex brain for {files:[...], done:bool} implementing ONLY it.
-  4. apply the patch under STRICT path safety (never escapes this folder, never
-     touches maestro-core or .git).
+  3. ask the Vertex brain for a JSON patch of small ANCHORED edits implementing
+     ONLY it (full-file rewrites truncate at the output limit, so 'edit'
+     find/replace is preferred; the model may 'need' a file and get re-asked).
+  4. apply under STRICT path safety (never escapes this folder, never
+     maestro-core/.git); validate-then-write, so a bad patch writes nothing.
   5. gate: py_compile every touched .py + offline smoke (LOOP_ALLOW_STUB=1).
-  6. GREEN  -> mark the story passes=true, log GREEN, best-effort git commit.
-     RED    -> after a bounded refine, roll the iteration's edits back and log
-               RED so the next iteration fixes it first. The tree stays green.
+  6. GREEN -> mark passes=true, log GREEN, best-effort git commit.
+     A parse/no-files/unsafe/RED failure -> feed the specific reason back and
+     retry; if every attempt fails, roll the edits back and log RED. Tree stays green.
 
 Run:
   python3 scripts/ralph/ralph.py            # build until done (max 10 iters)
@@ -74,7 +76,10 @@ PROGRESS_PATH = Path(os.environ.get("RALPH_PROGRESS", HERE / "progress.txt"))
 PROMPT_PATH = HERE / "prompt.md"
 
 MAX_ITERS_DEFAULT = _i("RALPH_MAX_ITERS", 10)
-REFINE_TRIES = max(0, _i("RALPH_REFINE_TRIES", 1))   # extra fix attempts on a RED gate
+# Attempts per story to get a usable, gate-passing patch. Each failed attempt
+# (unparseable/truncated reply, no files, unsafe patch, or RED gate) feeds the
+# specific reason back to the model and re-asks — instead of silently skipping.
+MAX_ATTEMPTS = max(1, _i("RALPH_MAX_ATTEMPTS", 3))
 CONTEXT_CHARS = _i("RALPH_CONTEXT_CHARS", 120_000)   # cap on included file context
 SMOKE_TIMEOUT = _i("RALPH_SMOKE_TIMEOUT", 900)
 SKIP_GUARD = _b("RALPH_SKIP_MAESTRO_GUARD", False)
@@ -113,28 +118,61 @@ def _safe_target(rel: str) -> Path:
 
 
 def _apply(files: list[dict]) -> tuple[list[str], dict]:
-    """Apply file edits in order. Returns (changelog, snapshot) where snapshot
-    maps abs-path -> prior bytes (or None if the file was created), enabling an
-    exact rollback. Validation happens before any write of each file."""
-    snapshot: dict[str, bytes | None] = {}
-    changelog: list[str] = []
+    """Apply a patch in two phases: VALIDATE every edit first (resolve paths,
+    check anchors), then WRITE. So a malformed/unsafe patch writes nothing and
+    needs no rollback. Returns (changelog, snapshot) where snapshot maps abs-path
+    -> prior bytes (or None if created), enabling an exact rollback later.
+
+    Actions:
+      edit    — anchored find/replace; 'find' must match EXACTLY ONCE (keeps the
+                model's output small so it can't truncate on large files).
+      create  — new file (or full overwrite) from 'content'.
+      append  — add 'content' to the end of an existing file.
+      rewrite — replace a whole file with 'content'.
+    """
+    plan: list[tuple] = []                       # (action, rel, target, a, b)
     for f in files:
         rel = (f.get("path") or "").strip()
         action = (f.get("action") or "create").strip().lower()
-        content = f.get("content")
-        if not rel or content is None:
-            raise ValueError(f"malformed file edit: {f!r}")
+        if not rel:
+            raise ValueError(f"edit missing 'path': {f!r}")
         target = _safe_target(rel)
+        if action == "edit":
+            find, repl = f.get("find"), f.get("replace")
+            if not find or repl is None:
+                raise ValueError(f"edit needs non-empty 'find' and a 'replace': {rel}")
+            if not target.exists():
+                raise ValueError(f"edit target does not exist: {rel}")
+            n = target.read_text(errors="replace").count(find)
+            if n != 1:
+                raise ValueError(
+                    f"edit 'find' must match EXACTLY ONCE in {rel} (matched {n}) — "
+                    "give a longer, unique anchor")
+            plan.append(("edit", rel, target, find, repl))
+        else:
+            content = f.get("content")
+            if content is None:
+                raise ValueError(f"{action} needs 'content': {rel}")
+            if action not in ("create", "append", "rewrite"):
+                raise ValueError(f"unknown action {action!r}: {rel}")
+            plan.append((action, rel, target, content, None))
+
+    snapshot: dict[str, bytes | None] = {}
+    changelog: list[str] = []
+    for action, rel, target, a, b in plan:
         if str(target) not in snapshot:
             snapshot[str(target)] = target.read_bytes() if target.exists() else None
         target.parent.mkdir(parents=True, exist_ok=True)
-        if action == "append" and target.exists():
+        if action == "edit":
+            target.write_text(target.read_text().replace(a, b, 1))
+            changelog.append(f"edit    -> {rel}")
+        elif action == "append" and target.exists():
             base = target.read_text()
-            target.write_text(base.rstrip() + "\n\n" + content.strip() + "\n")
+            target.write_text(base.rstrip() + "\n\n" + a.strip() + "\n")
             changelog.append(f"append  -> {rel}")
         else:
             existed = snapshot[str(target)] is not None
-            target.write_text(content if content.endswith("\n") else content + "\n")
+            target.write_text(a if a.endswith("\n") else a + "\n")
             changelog.append(f"{'rewrite' if existed else 'create '} -> {rel}")
     return changelog, snapshot
 
@@ -387,31 +425,82 @@ def _relevant_files(story: dict) -> dict[str, str]:
     return out
 
 
-_CONTRACT = """Reply with ONLY this JSON object, no prose, no markdown fence:
+def _parse_patch(raw: str) -> dict:
+    """Parse the model's JSON patch, tolerating a ```json … ``` fence. Raises
+    ValueError when no complete JSON object is present — the usual fingerprint of
+    a reply truncated by the output-token limit (a big full-file 'content')."""
+    txt = (raw or "").strip()
+    if txt.startswith("```"):
+        nl = txt.find("\n")
+        txt = txt[nl + 1:] if nl != -1 else txt
+        fence = txt.rfind("```")
+        if fence != -1:
+            txt = txt[:fence]
+    return proposer._extract_json(txt)
+
+
+_CONTRACT = """Reply with ONLY this JSON object — no prose, no markdown fence:
 {
   "rationale": "one sentence: how this implements the story",
   "done": true,
   "files": [
-    {"path": "outcomes.py", "action": "create", "content": "<full file text>"},
-    {"path": "smoke_test.py", "action": "append", "content": "<new offline checks>"}
+    {"path": "existing.py", "action": "edit", "find": "<unique exact snippet>", "replace": "<replacement>"},
+    {"path": "new_module.py", "action": "create", "content": "<full text of the NEW file>"},
+    {"path": "smoke_test.py", "action": "edit", "find": "<anchor line>", "replace": "<anchor line + new offline checks>"}
   ],
+  "need": [],
   "progress_note": "concise learnings/gotchas for the next iteration"
 }
-Rules for the patch:
-- "action": "create" (new file or full overwrite), "rewrite" (replace a whole
-  existing file), or "append" (add to the end of an existing file).
-- "content" is the LITERAL file text (for create/rewrite, the ENTIRE file).
-- Only touch files inside THIS folder. NEVER write under maestro-core or .git.
-- You MUST extend smoke_test.py with offline (LOOP_ALLOW_STUB=1) checks for the
-  new behaviour; the gate runs it and rejects you if it goes red.
-- Set "done": false if you could only land a coherent partial slice (then the
-  story stays open for the next iteration) — keep smoke green either way."""
+
+ACTIONS — pick the SMALLEST one that works:
+- "edit"    PREFERRED for changing an existing file: anchored find/replace. "find"
+            must appear EXACTLY ONCE in the file; "replace" is the new text. Output
+            stays tiny so it can't truncate. Use several edit blocks for several spots.
+- "create"  a brand-new file; "content" is its full text.
+- "append"  add "content" to the end of an existing file.
+- "rewrite" replace a whole file with "content". AVOID on files over ~150 lines —
+            a large "content" gets TRUNCATED by the output limit and your whole reply
+            is lost. Use multiple "edit" blocks instead.
+
+HARD RULES:
+- Only touch files inside THIS folder; NEVER under maestro-core or .git.
+- You MUST add/extend OFFLINE smoke checks (LOOP_ALLOW_STUB=1) in smoke_test.py for
+  the new behaviour (usually an "edit" anchored on an existing line). The gate runs it.
+- Set "done": false for a coherent partial slice; keep smoke green either way.
+- If you cannot proceed without seeing a file you were not given, return "files": []
+  and list the path(s) in "need" — you will be re-asked with their full contents."""
+
+# Specific feedback fed back to the model on each failed attempt (closes the gap
+# where an unusable reply was silently skipped and the next iteration repeated it).
+_FB_TRUNCATED = ("Your previous reply could not be parsed as JSON — it was almost certainly "
+    "TRUNCATED by the output limit because it emitted a large full-file 'content'. Do NOT "
+    "rewrite whole files. Use small \"action\":\"edit\" blocks (unique 'find' + 'replace'). "
+    "Reply with ONLY the JSON object.")
+_FB_NOFILES = ("Your previous reply contained no usable 'files'. Return the patch now as small "
+    "anchored edits ('action':'edit' with 'find'/'replace') for existing files, or 'create' for "
+    "genuinely new files. If you needed to see a file, put its path in 'need'.")
+_FB_GOTFILES = ("The file(s) you requested are now included under RELEVANT FILE CONTENTS. Return "
+    "the patch as small anchored edits.")
+_FB_UNSAFE = ("Your previous patch was rejected: {e}. Fix the path or the 'find' anchor (it must "
+    "match exactly once) and return small anchored edits.")
+_FB_REDGATE = ("Your previous patch failed the gate (py_compile + offline smoke):\n{detail}\n"
+    "Fix the cause. Keep edits small and make sure smoke_test.py still passes offline "
+    "(LOOP_ALLOW_STUB=1).")
 
 
-def build_prompt(story: dict, refine_note: str = "") -> str:
+def build_prompt(story: dict, refine_note: str = "",
+                 extra_files: list[str] | None = None) -> str:
     rules = PROMPT_PATH.read_text() if PROMPT_PATH.exists() else ""
     progress = PROGRESS_PATH.read_text() if PROGRESS_PATH.exists() else "(none)"
     files = _relevant_files(story)
+    for rel in (extra_files or []):              # read-back: files the model asked to see
+        try:
+            p = _safe_target(rel)
+            key = str(p.relative_to(ROOT.resolve()))
+            if p.exists() and key not in files:
+                files[key] = p.read_text(errors="ignore")[:CONTEXT_CHARS]
+        except (ValueError, OSError):
+            pass
     files_block = "\n".join(
         f"\n--- {name} ---\n{body}" for name, body in files.items())
     parts = [
@@ -426,14 +515,19 @@ def build_prompt(story: dict, refine_note: str = "") -> str:
         files_block,
     ]
     if refine_note:
-        parts += ["\n## YOUR PREVIOUS ATTEMPT FAILED THE GATE — FIX IT\n", refine_note]
+        parts += ["\n## FIX REQUIRED — your previous attempt did not land\n", refine_note]
     parts += ["\n## OUTPUT CONTRACT\n", _CONTRACT]
     return "\n".join(parts)
 
 
 # --- one iteration ----------------------------------------------------------
 def run_iteration(i: int, call_fn, *, commit: bool = True) -> str:
-    """Returns: 'promoted' | 'partial' | 'red' | 'done'."""
+    """Returns: 'promoted' | 'partial' | 'red' | 'done'.
+
+    Up to MAX_ATTEMPTS tries to land a gate-passing patch for the story. Each
+    failure mode — unparseable/truncated reply, no files, an unsafe patch, or a
+    RED gate — feeds its specific reason back to the model and re-asks (and a
+    'need' request pulls the missing file in), instead of silently skipping."""
     prd = load_prd()
     story = next_story(prd)
     if story is None:
@@ -444,90 +538,93 @@ def run_iteration(i: int, call_fn, *, commit: bool = True) -> str:
     _publish_state(prd, iteration=i, running=True, phase="ralph-build", current=sid)
     guard_maestro()
 
-    raw = call_fn(build_prompt(story))
-    telemetry.thought("ralph", "(story " + sid + ")", raw, story=sid)
-    tries = 0
+    attempt = 0
 
     def emit(result, *, done=False, changes=None, note="", commit_hash=None, detail=""):
         _publish_event({"iteration": i, "story": sid, "title": title,
                         "result": result, "done": done, "changes": changes or [],
-                        "note": note, "commit": commit_hash, "refines": tries,
-                        "detail": detail[:400]})
+                        "note": note, "commit": commit_hash,
+                        "refines": max(0, attempt - 1), "detail": detail[:400]})
         override = {sid: "red"} if result in ("red", "rejected") else None
         _publish_state(load_prd(), iteration=i, running=True,
                        phase="ralph-idle", current=None, override=override)
 
-    try:
-        patch = proposer._extract_json(raw)
-    except ValueError as e:
-        log_progress(f"iter {i} {sid}: brain returned no JSON ({e}) — skipped")
-        emit("rejected", detail=str(e))
-        return "red"
-    files = patch.get("files") or []
-    if not files:
-        log_progress(f"iter {i} {sid}: brain proposed no files — skipped")
-        emit("rejected", detail="no files in patch")
-        return "red"
-
-    applied_meta: list[dict] = []
+    note = ""                       # feedback to the model between attempts
+    requested: list[str] = []       # read-back: files the model asked to see
+    ok = False
     snapshot: dict = {}
-    try:
-        changelog, snapshot = _apply(files)
-    except ValueError as e:
-        if snapshot:
-            _rollback(snapshot)
-        log_progress(f"iter {i} {sid}: REJECTED unsafe patch — {e}")
-        telemetry.phase("ralph-idle", iteration=i, story=sid, result="rejected")
-        emit("rejected", detail=str(e))
-        return "red"
-    applied_meta += [{"path": f.get("path", ""), "action": f.get("action", "create")}
-                     for f in files]
-    print("  applied:\n    " + "\n    ".join(changelog))
+    changes: list = []
+    detail = ""
+    last_fail = "no usable patch produced"
+    patch: dict = {}
 
-    ok, detail = _gate([m["path"] for m in applied_meta])
-    while not ok and tries < REFINE_TRIES:
-        tries += 1
-        print(f"  gate RED — refine attempt {tries}/{REFINE_TRIES}")
-        telemetry.phase("ralph-refine", iteration=i, story=sid, attempt=tries)
-        raw = call_fn(build_prompt(story, refine_note=detail))
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        if attempt > 1:
+            telemetry.phase("ralph-refine", iteration=i, story=sid, attempt=attempt - 1)
+            print(f"  retry {attempt - 1}/{MAX_ATTEMPTS - 1} — {last_fail}")
+        raw = call_fn(build_prompt(story, refine_note=note, extra_files=requested))
+        telemetry.thought("ralph", f"(story {sid} attempt {attempt})", raw, story=sid)
+
         try:
-            patch = proposer._extract_json(raw)
+            patch = _parse_patch(raw)
         except ValueError:
-            break
-        files2 = patch.get("files") or []
-        try:
-            cl2, snap2 = _apply(files2)
-        except ValueError as e:
-            log_progress(f"iter {i} {sid}: refine produced unsafe patch — {e}")
-            break
-        for k, v in snap2.items():          # keep the EARLIEST prior state per file
-            snapshot.setdefault(k, v)
-        applied_meta += [{"path": f.get("path", ""), "action": f.get("action", "create")}
-                         for f in files2]
-        ok, detail = _gate([m["path"] for m in applied_meta])
+            last_fail = "reply did not parse (likely truncated)"
+            note = _FB_TRUNCATED
+            continue
 
-    changes = _change_records(applied_meta, snapshot)   # capture BEFORE any rollback
+        files = patch.get("files") or []
+        if not files:
+            need = [n for n in (patch.get("need") or patch.get("need_files") or [])
+                    if isinstance(n, str)]
+            if need and not requested:
+                requested = need[:6]
+                last_fail = "model asked to see: " + ", ".join(requested)
+                note = _FB_GOTFILES
+                continue
+            last_fail = "reply had no files"
+            note = _FB_NOFILES
+            continue
+
+        try:
+            changelog, snapshot = _apply(files)
+        except ValueError as e:
+            last_fail = f"patch rejected: {e}"
+            note = _FB_UNSAFE.format(e=str(e)[:200])
+            snapshot = {}
+            continue
+
+        applied_meta = [{"path": f.get("path", ""), "action": f.get("action", "create")}
+                        for f in files]
+        print("  applied:\n    " + "\n    ".join(changelog))
+        ok, detail = _gate([m["path"] for m in applied_meta])
+        changes = _change_records(applied_meta, snapshot)   # capture BEFORE any rollback
+        if ok:
+            break
+        _rollback(snapshot)                                  # red → undo, feed back, retry
+        snapshot = {}
+        last_fail = "gate RED (py_compile/smoke)"
+        note = _FB_REDGATE.format(detail=detail[:700])
 
     if not ok:
-        _rollback(snapshot)
+        if snapshot:
+            _rollback(snapshot)
         smoke_marker("RED", i)
-        log_progress(f"iter {i} {sid}: smoke RED after {tries} refine(s) — "
-                     f"rolled back. tail: {detail[:200]!r}")
+        log_progress(f"iter {i} {sid}: RED after {attempt} attempt(s) — rolled back. {last_fail}")
         telemetry.phase("ralph-idle", iteration=i, story=sid, result="red")
-        emit("red", changes=changes, detail=detail)
+        emit("red", changes=changes, detail=(detail or last_fail))
         return "red"
 
     done = bool(patch.get("done", True))
     if done:
         mark_done(sid)
     smoke_marker("GREEN", i)
-    note = (patch.get("progress_note") or "").strip()
+    note_out = (patch.get("progress_note") or "").strip()
     log_progress(f"iter {i} {sid}: GREEN — {'story DONE' if done else 'partial slice kept'}"
-                 + (f". {note}" if note else ""))
+                 + (f". {note_out}" if note_out else ""))
     commit_hash = git_commit(f"ralph: {sid} {title[:60]}".rstrip()) if commit else None
     telemetry.phase("ralph-idle", iteration=i, story=sid, result="green", done=done)
     emit("green" if done else "partial", done=done, changes=changes,
-         note=note, commit_hash=commit_hash)
+         note=note_out, commit_hash=commit_hash)
     return "promoted" if done else "partial"
 
 
@@ -662,8 +759,39 @@ def selftest() -> int:
         chk("red story NOT marked done",
             json.loads(PRD_PATH.read_text())["userStories"][0]["passes"] in (False, None))
         chk("progress logged RED", "RED" in PROGRESS_PATH.read_text())
+
+        # 4) anchored 'edit' action: find/replace on an existing file
+        edit_rel = "workspace/_ralph_selftest_edit.py"
+        (ROOT / edit_rel).write_text("ALPHA = 1\nBETA = 2\n")
+        _apply([{"path": edit_rel, "action": "edit", "find": "ALPHA = 1", "replace": "ALPHA = 99"}])
+        eb = (ROOT / edit_rel).read_text()
+        chk("edit action does anchored find/replace", "ALPHA = 99" in eb and "BETA = 2" in eb)
+        nonuniq = False
+        try:
+            _apply([{"path": edit_rel, "action": "edit", "find": " = ", "replace": " == "}])
+        except ValueError:
+            nonuniq = True
+        chk("edit rejects a non-unique anchor", nonuniq)
+
+        # 5) feedback retry: an empty first reply must NOT waste the iteration —
+        #    the builder re-asks with feedback and recovers in the same iteration.
+        PRD_PATH.write_text(json.dumps({"project": "selftest", "userStories": [
+            {"id": "T3", "priority": 1, "passes": False, "title": "retry recovery"}]}))
+        rcalls = {"n": 0}
+
+        def stub_retry(_prompt: str) -> str:
+            rcalls["n"] += 1
+            if rcalls["n"] == 1:
+                return json.dumps({"rationale": "oops, forgot the files", "files": []})
+            return json.dumps({"rationale": "recovered", "done": True,
+                "files": [{"path": artifact, "action": "create",
+                           "content": "# retry recovered\nVALUE = 7\n"}]})
+
+        res3 = run_iteration(3, stub_retry, commit=False)
+        chk("feedback retry recovers from an empty reply (no wasted iteration)",
+            res3 == "promoted" and rcalls["n"] >= 2)
     finally:
-        for rel in (artifact, broken):
+        for rel in (artifact, broken, "workspace/_ralph_selftest_edit.py"):
             _safe_unlink(ROOT / rel)
         shutil.rmtree(tmp, ignore_errors=True)
         PRD_PATH, PROGRESS_PATH, config.WORKSPACE = saved_prd, saved_prog, saved_ws

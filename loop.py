@@ -199,7 +199,8 @@ def _screen_candidate(idx, beam_i, patch, miss_ids, sample, cases, champion_eval
 
 
 def _propose_beam(idx, champion_eval, champ_train_misses, fp_holder, cases, split,
-                  *, call_model_fn, get_diff_fn, run_reviewer_fn, plateaued):
+                  *, call_model_fn, get_diff_fn, run_reviewer_fn, plateaued,
+                  dismissed_outcomes=None):
     """Beam search: up to BEAM_WIDTH distinct proposals per iteration (deduped
     against the attempt memory), each screened cheaply; only the best survivor
     goes on to the expensive full confirm. When the loop has plateaued the beam
@@ -223,6 +224,7 @@ def _propose_beam(idx, champion_eval, champ_train_misses, fp_holder, cases, spli
         try:
             patch = proposer.propose_edit(
                 config.CHAMPION_DIR, ev, false_positives=fp_holder["examples"],
+                dismissed_outcomes=dismissed_outcomes,
                 call_model_fn=call_model_fn, failed_attempts=failures,
                 avoid=tried_rationales)
         except Exception as e:
@@ -260,7 +262,8 @@ def _propose_beam(idx, champion_eval, champ_train_misses, fp_holder, cases, spli
 
 def run_iteration(idx, kind, cases, split, champion_eval, champ_fp, fp_holder,
                   corpus_comments, reporter, *, get_diff_fn, run_reviewer_fn,
-                  call_model_fn, fixed_diff_fn, plateaued=False):
+                  call_model_fn, fixed_diff_fn, plateaued=False,
+                  dismissed_outcomes=None, acted_on_outcomes=None):
     """One mutation -> gate cycle. Returns (champion_eval, champ_fp, accepted)."""
     train_ids, val_ids = split
     size_champ = metrics.skill_size(config.CHAMPION_DIR)
@@ -275,6 +278,7 @@ def run_iteration(idx, kind, cases, split, champion_eval, champ_fp, fp_holder,
         calls = 1
     elif kind == "corpus":
         patch = proposer.propose_from_corpus(config.CHAMPION_DIR, corpus_comments,
+                                             acted_on_outcomes=acted_on_outcomes,
                                              call_model_fn=call_model_fn)
         calls = 1
         if not patch.get("edits"):
@@ -293,7 +297,8 @@ def run_iteration(idx, kind, cases, split, champion_eval, champ_fp, fp_holder,
         best, calls, dupes, tried, last_reject = _propose_beam(
             idx, champion_eval, champ_train_misses, fp_holder, cases, split,
             call_model_fn=call_model_fn, get_diff_fn=get_diff_fn,
-            run_reviewer_fn=run_reviewer_fn, plateaued=plateaued)
+            run_reviewer_fn=run_reviewer_fn, plateaued=plateaued,
+            dismissed_outcomes=dismissed_outcomes)
         if best is None:
             rec = {"iter": idx, "kind": kind, "status": "rejected", "model_calls": calls,
                    "rationale": "; ".join(r for r in tried if r)[:400] or "(none)",
@@ -325,6 +330,10 @@ def run_iteration(idx, kind, cases, split, champion_eval, champ_fp, fp_holder,
     size_cand = metrics.skill_size(config.CANDIDATE_DIR)
     base = {"iter": idx, "kind": kind, "rationale": patch.get("rationale", "(none)"),
             "changelog": changelog, "size": size_cand, "champ_recall": champion_eval["recall"]}
+    if kind == "propose" and dismissed_outcomes:
+        base["outcomes_dismissed_used"] = len(dismissed_outcomes)
+    elif kind == "corpus" and acted_on_outcomes:
+        base["outcomes_acted_on_used"] = len(acted_on_outcomes)
     if beam_meta:
         base["beam"] = beam_meta
 
@@ -509,6 +518,14 @@ def run_loop(*, max_iters=None, fresh=False, get_diff_fn=None, run_reviewer_fn=N
 
     limit = config.MAX_ITERS if max_iters is None else max_iters
     idx = 0
+    if config.LOOP_OUTCOMES:
+        out_data = outcomes.load_outcomes()
+        dismissed_outcomes = out_data["dismissed"][-20:]
+        acted_on_outcomes = out_data["acted_on"][-20:]
+    else:
+        dismissed_outcomes = []
+        acted_on_outcomes = []
+
     while limit == 0 or idx < limit:
         idx += 1
         t0 = time.time()
@@ -549,7 +566,8 @@ def run_loop(*, max_iters=None, fresh=False, get_diff_fn=None, run_reviewer_fn=N
                 idx, kind, cases, split, champion_eval, champ_fp, fp_holder, batch, reporter,
                 get_diff_fn=eff_get_diff, run_reviewer_fn=run_reviewer_fn,
                 call_model_fn=call_model_fn, fixed_diff_fn=fixed_diff_fn,
-                plateaued=plateaued)
+                plateaued=plateaued, dismissed_outcomes=dismissed_outcomes,
+                acted_on_outcomes=acted_on_outcomes)
         except Exception as e:
             rec = {"iter": idx, "kind": kind, "status": "error", "reason": str(e)[:300],
                    "model_calls": 0}

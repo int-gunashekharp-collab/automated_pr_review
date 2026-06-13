@@ -22,7 +22,7 @@
     {
       "id": "S2",
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "title": "Outcome feedback: dismissed findings become do-not-flag targets, acted-on misses become propose targets",
       "asA": "loop operator",
       "iWant": "outcomes.jsonl wired into the proposer inputs behind LOOP_OUTCOMES=1",

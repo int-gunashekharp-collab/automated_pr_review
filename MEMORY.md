@@ -367,6 +367,36 @@ GLOBAL endpoint. (Note: `gemini-3-pro-preview` was discontinued 2026-03-26.)
      the page serves the builder DOM; loop smoke still 37/37.
    - To watch a real run: `python3 dashboard_server.py` (terminal 1) +
      `RALPH_SKIP_MAESTRO_GUARD=1 python3 scripts/ralph/ralph.py 5` (terminal 2).
+14. **Builder reliability fix (2026-06-13).** A real run exposed the single-shot
+   weakness: ralph built S1 well (2 iters, real `outcomes.py` + `loop.py`
+   `--mine-outcomes`, smoke green) but then **burned iterations 3–5 on S2** with
+   "brain proposed no files." Root cause from telemetry: S2 needs to edit big
+   existing files (`proposer.py`/`config.py`), the model returned them as full
+   17–88 KB `rewrite` `content` strings that **truncated at the output limit**,
+   so `_extract_json` fell back to a fragment with no `files` — and the no-files
+   path **silently skipped with no feedback**, so each fresh iteration repeated
+   the identical failure. Fixes (all in `scripts/ralph/ralph.py` + `prompt.md`):
+   - **Anchored `edit` action**: `{action:"edit", find, replace}` find/replace
+     that must match EXACTLY ONCE — preferred over rewrites so output stays tiny
+     and can't truncate. `_apply` is now **two-phase** (validate-all → write), so
+     a malformed/unsafe patch writes nothing (no partial state, no rollback need).
+   - **`_parse_patch`**: strips ```json fences and surfaces truncation as a clear
+     error instead of a silent fragment.
+   - **Unified feedback-retry loop** (`MAX_ATTEMPTS`, env `RALPH_MAX_ATTEMPTS`,
+     default 3): parse-fail / no-files / unsafe-patch / RED-gate each feed their
+     SPECIFIC reason back to the model and re-ask within the same iteration,
+     replacing the old silent-skip + gate-only refine. Closes the wasted-
+     iteration gap that lost iters 3–5.
+   - **Lightweight read-back**: model returns `"files":[]` + `"need":[paths]` and
+     is re-asked with those files' full contents (the documented single-shot gap).
+   - `_CONTRACT` + `prompt.md` now teach edit-first, warn that big rewrites
+     truncate, and document `need`. Removed the `RALPH_REFINE_TRIES` knob.
+   - Verified offline: selftest **17 → 20** (adds: edit find/replace, non-unique
+     anchor rejected, and feedback-retry recovering from an empty reply — the
+     trace literally shows "retry 1/2 — reply had no files" then promote); loop
+     smoke still green; selftest leaves the real workspace clean. Still open:
+     full multi-turn agentic editing (this is robust single-shot + retries, not a
+     true tool-use agent) and the loop's own `recall=None` health issue (separate).
 
 ---
 

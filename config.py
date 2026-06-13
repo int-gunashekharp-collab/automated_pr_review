@@ -164,3 +164,4 @@ SILVER_MIN_CONF = _f("LOOP_SILVER_MIN_CONF", 0.7)
 # Real runs FAIL LOUDLY if maestro-core is missing. Only when LOOP_ALLOW_STUB=1
 # (the smoke test sets it) may harness_bridge fall back to stub_harness/.
 ALLOW_STUB = _b("LOOP_ALLOW_STUB", False)
+LOOP_OUTCOMES = _b("LOOP_OUTCOMES", False)

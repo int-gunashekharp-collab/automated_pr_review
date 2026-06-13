@@ -25,11 +25,11 @@ import telemetry
 EDIT_PROMPT = """You maintain the maestro-core PR-review conventions skill. An
 eval ran the reviewer (Gemini 3.1 Pro) over historical PRs with known,
 human-verified bugs. Below: (1) the FULL current skill, (2) the TRAIN bugs the
-reviewer MISSED (with what it said instead), and (3) optionally, FALSE POSITIVES
-it raised on already-fixed code.
+reviewer MISSED (with what it said instead), (3) optionally, FALSE POSITIVES
+it raised on already-fixed code, and (4) DISMISSED FINDINGS from real PRs where the author pushed back.
 
-Propose the SMALLEST edit that makes the reviewer catch the misses and stop the
-false positives.
+Propose the SMALLEST edit that makes the reviewer catch the misses, stop the
+false positives, and stop flagging the dismissed patterns.
 
 Hard rules:
 - Be mechanism-specific: name the exact pattern, the failure, and the bug class.
@@ -59,14 +59,16 @@ Reply with ONLY this JSON, no prose around it:
 
 === FALSE POSITIVES (reviewer flagged these already-fixed issues) ===
 {fps}
+
+=== DISMISSED FINDINGS (reviewer flagged these but author rebutted/ignored) ===
+{dismissed}
 """
 
 CORPUS_PROMPT = """You maintain the maestro-core PR-review conventions skill.
-Below: (1) the FULL current skill and (2) real human review comments mined from
-this team's merged PRs, with resolution status (resolved = the author acted on
-it; unresolved = possibly dismissed). diff_hunk is the code the comment was on.
+Below: (1) the FULL current skill, (2) real human review comments mined from
+this team's merged PRs, with resolution status, and (3) ACTED-ON AI FINDINGS where the author accepted the AI's suggestion.
 
-UNDERSTAND these comments and find ONE recurring pattern (backed by >= 2
+UNDERSTAND these comments and findings and find ONE recurring pattern (backed by >= 2
 comments, preferring RESOLVED ones) that the current skill does NOT already
 cover. Turn it into a single rubric improvement.
 
@@ -94,6 +96,9 @@ Reply with ONLY this JSON, no prose:
 
 === HUMAN REVIEW COMMENTS (JSONL: pr, path, resolved, body, hunk) ===
 {comments}
+
+=== ACTED-ON AI FINDINGS (AI found these, author accepted; codify if not covered) ===
+{acted_on}
 """
 
 CONSOLIDATE_PROMPT = """You maintain the maestro-core PR-review conventions
@@ -184,6 +189,12 @@ def _format_fps(fps: list[dict]) -> str:
         f"'{f['bug'][:80]}' — said {f['excerpt'][:300].strip()!r}" for f in fps)
 
 
+def _format_outcomes(outcomes: list[dict] | None) -> str:
+    if not outcomes:
+        return "(none)"
+    return "\n".join(f"- PR #{o.get('pr')} {o.get('path')}: {o.get('body', '')[:300]}" for o in outcomes)
+
+
 def call_vertex(prompt: str, *, log_name: str = "proposer-prompt.txt",
                 prefix: str = "proposer-") -> str:
     """One Vertex call (the SAME brain as the reviewer, scripts/gemini_vertex.py)
@@ -252,7 +263,7 @@ def _finish(raw: str) -> dict:
 
 
 def propose_edit(champion_dir: Path, eval_result: dict, *,
-                 false_positives=None, call_model_fn=None,
+                 false_positives=None, dismissed_outcomes=None, call_model_fn=None,
                  failed_attempts: list[dict] | None = None,
                  avoid: list[str] | None = None) -> dict:
     """Propose one rubric edit targeting the train misses.
@@ -266,7 +277,8 @@ def propose_edit(champion_dir: Path, eval_result: dict, *,
         noise=eval_result.get("noise"),
         skill=_full_skill_text(champion_dir),
         misses=_format_misses(eval_result.get("missed_train", eval_result.get("missed", []))),
-        fps=_format_fps(false_positives or []))
+        fps=_format_fps(false_positives or []),
+        dismissed=_format_outcomes(dismissed_outcomes))
     if failed_attempts:
         prompt += REFLECT_ADDENDUM.format(failures=_format_failures(failed_attempts))
     if avoid:
@@ -291,12 +303,13 @@ def _format_corpus(comments: list[dict]) -> str:
 
 
 def propose_from_corpus(champion_dir: Path, comments: list[dict], *,
-                        call_model_fn=None) -> dict:
+                        acted_on_outcomes=None, call_model_fn=None) -> dict:
     """Understand a batch of human review comments and propose ONE rubric rule.
     May return {"edits": []} when nothing new recurs — the loop then skips."""
     call_model_fn = call_model_fn or _default_call_model
     prompt = CORPUS_PROMPT.format(
-        skill=_full_skill_text(champion_dir), comments=_format_corpus(comments))
+        skill=_full_skill_text(champion_dir), comments=_format_corpus(comments),
+        acted_on=_format_outcomes(acted_on_outcomes))
     raw = call_model_fn(prompt)
     telemetry.thought("corpus", prompt, raw, comments=len(comments))
     patch = _extract_json(raw)

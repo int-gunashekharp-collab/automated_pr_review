@@ -24,6 +24,13 @@ that keeps the offline smoke test green. Your patch MUST include the offline
 them. If the story is too big for one clean patch, ship a coherent slice and set
 `"done": false` (it stays open for the next iteration); never leave smoke red.
 
+**Prefer small anchored `edit` (find/replace) blocks over full-file rewrites.** A
+large `rewrite`/`create` `content` gets truncated at the output-token limit and
+your entire reply is lost (this is the #1 cause of a wasted iteration). To change
+an existing file, anchor on a unique snippet and replace just that. If you need to
+see a file you weren't given, return `"files": []` with the path in `"need"` — you
+will be re-asked with its full contents rather than guessing.
+
 ## HARD RULES (violating any of these fails the iteration)
 
 - **NEVER write anything inside maestro-core** (`$MAESTRO_ROOT`, default

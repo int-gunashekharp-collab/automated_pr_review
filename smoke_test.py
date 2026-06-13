@@ -76,6 +76,7 @@ os.environ.update(
     LOOP_PRECISION_EVERY="1", LOOP_PRECISION_SAMPLE="3", LOOP_MAX_SKILL_CHARS="100000",
     # v2 feature knobs under test
     LOOP_ALLOW_STUB="1",         # run even without maestro-core (stub harness)
+    LOOP_OUTCOMES="1",           # enable outcome feedback feature
     LOOP_BEAM="2",               # beam search: 2 proposals per propose-iteration
     LOOP_MODEL_RETRIES="0",      # no retry sleeps inside tests
     LOOP_PLATEAU_ITERS="2",      # reflect-mode threshold (not expected to trip here)
@@ -138,6 +139,11 @@ def fake_reviewer(prompt: str, prompt_file: Path) -> str:
 
 
 def fake_model(prompt: str) -> str:
+    if "HUMAN REVIEW COMMENTS" in prompt:
+        assert "ai finding accepted" in prompt, "acted-on outcomes missing in corpus prompt"
+    if "MISSED TRAIN BUGS" in prompt:
+        assert "ai finding rejected" in prompt, "dismissed outcomes missing in propose prompt"
+
     if "Rewrite the file(s)" in prompt:                       # consolidation -> shrink
         return json.dumps({"rationale": "merge db rules",
                            "edits": [{"file": "references/db.md", "action": "rewrite",
@@ -188,6 +194,14 @@ def main():
                              train_ids=set(), val_ids=set(), champ_size=200, cand_size=120,
                              noise_tol=0.1, max_size=99999)[0]
     check("consolidation accepts smaller+equal-recall", cons_ok is True)
+
+    # ---- fake outcomes data ----
+    config.WORKSPACE.mkdir(parents=True, exist_ok=True)
+    (config.WORKSPACE / "outcomes.jsonl").write_text(json.dumps(
+        {"pr": 100, "path": "src/o.py", "body": "ai finding accepted", "outcome": "acted_on"}
+    ) + "\n" + json.dumps(
+        {"pr": 101, "path": "src/p.py", "body": "ai finding rejected", "outcome": "dismissed"}
+    ) + "\n")
 
     # ---- full loop: propose -> corpus -> consolidate ----
     seed_before = dir_hash(SEED)
