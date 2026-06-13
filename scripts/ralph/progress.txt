@@ -44,3 +44,5 @@ smoke: GREEN after iteration 3
 iter 3 S3: GREEN — partial slice kept. Fixed the smoke_test crash (checking state after rollback). Wired beyond_humans into state and API. Next iteration needs dashboard.html to update the UI and mark the story done.
 smoke: GREEN after iteration 4
 iter 4 S3: GREEN — story DONE. Finished UI integration for S3. Marked story done.
+smoke: GREEN after iteration 5
+iter 5 S4: GREEN — story DONE. Added replay.py, wired `--replay` via loop.py CLI with MAX_CALLS_PER_DAY bounds logic, and verified via mocked offline smoke test. Report prints character differences.

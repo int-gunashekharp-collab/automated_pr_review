@@ -52,7 +52,7 @@
     {
       "id": "S4",
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "title": "Counterfactual replay: champion vs live skill on recent merged PRs",
       "asA": "team lead deciding on adoption",
       "iWant": "replay.py + python3 loop.py --replay N that reviews the last N merged PR diffs with BOTH the live skill and the champion",

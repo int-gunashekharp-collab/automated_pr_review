@@ -432,3 +432,45 @@ def _test_cli_outcomes():
 
 if __name__ == "__main__":
     _test_cli_outcomes()
+
+def _test_cli_replay():
+    import sys
+    import os
+    import loop
+    import replay
+    from unittest.mock import patch
+
+    def fake_run_gh(args):
+        if "list" in args:
+            return '[{"number": 201, "title": "A PR", "url": "http://pr"}]'
+        if "diff" in args:
+            return "diff --git a/src/new.py b/src/new.py\n+new line"
+        return ""
+
+    def mock_reviewer(prompt, pf):
+        return "mocked review finding"
+
+    print("---- loop.py --replay CLI smoke ----")
+    import config
+    config.CHAMPION_DIR.mkdir(parents=True, exist_ok=True)
+    (config.CHAMPION_DIR / "SKILL.md").write_text("# champion")
+
+    with patch.object(sys, "argv", ["loop.py", "--replay", "1"]):
+        with patch("replay._default_run_gh", side_effect=fake_run_gh):
+            with patch("harness_bridge.default_run_reviewer", side_effect=mock_reviewer):
+                try:
+                    loop.main()
+                except SystemExit as e:
+                    if e.code != 0:
+                        print(f"SMOKE TEST FAILED: CLI --replay exited with {e.code}")
+                        sys.exit(1)
+
+    replay_md = config.REPORTS_DIR / "replay" / "REPLAY.md"
+    if not replay_md.exists() or "Counterfactual" not in replay_md.read_text():
+        print("SMOKE TEST FAILED: CLI --replay did not generate REPLAY.md properly")
+        sys.exit(1)
+        
+    print("  [PASS] CLI --replay completed")
+
+if __name__ == "__main__":
+    _test_cli_replay()

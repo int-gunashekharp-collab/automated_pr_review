@@ -760,6 +760,8 @@ def main():
                     help="retire a bad silver case (kept in history, out of the eval)")
     ap.add_argument("--mine-outcomes", action="store_true",
                     help="mine outcomes of the AI reviewer's comments on merged PRs")
+    ap.add_argument("--replay", type=int, metavar="N", default=0,
+                    help="review the last N merged PR diffs with BOTH live and champion skills")
     args = ap.parse_args()
 
     if args.mine_outcomes:
@@ -769,6 +771,36 @@ def main():
               f"+{stats.get('new_dismissed', 0)} dismissed, "
               f"+{stats.get('new_unknown', 0)} unknown "
               f"(append-only to {config.WORKSPACE / 'outcomes.jsonl'})")
+        return None
+    if args.replay > 0:
+        import replay
+        s = {}
+        if config.STATE_FILE.exists():
+            try:
+                s = json.loads(config.STATE_FILE.read_text())
+            except Exception:
+                pass
+        calls_day = s.get("calls_day") or {"day": _today(), "calls": 0}
+        
+        def tracked_reviewer(prompt, pf):
+            if config.MAX_CALLS_PER_DAY > 0:
+                if calls_day.get("day") != _today():
+                    calls_day.update({"day": _today(), "calls": 0})
+                if calls_day["calls"] >= config.MAX_CALLS_PER_DAY:
+                    print("Call budget exhausted.", flush=True)
+                    raise RuntimeError("MAX_CALLS_PER_DAY exceeded")
+            out = hb.default_run_reviewer(prompt, pf)
+            calls_day["calls"] += 1
+            return out
+            
+        try:
+            replay.run_replay(args.replay, run_reviewer_fn=tracked_reviewer)
+        finally:
+            if config.STATE_FILE.exists():
+                s["calls_day"] = calls_day
+                tmp = config.STATE_FILE.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(s, indent=2))
+                os.replace(tmp, config.STATE_FILE)
         return None
     if args.harvest_silver:
         hv = silver.harvest(0)
