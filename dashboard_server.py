@@ -97,6 +97,7 @@ def _prune_state(state):
         "model": state.get("model"), "project": state.get("project"),
         "shadow": state.get("shadow"), "consec_rejects": state.get("consec_rejects"),
         "calls_day": state.get("calls_day"),
+        "beyond_humans": state.get("beyond_humans", 0),
     }
 
 
@@ -411,7 +412,8 @@ def run_demo_writer(ws: Path, speed: float):
             "model": "gemini-3.1-pro-preview", "project": "snabbit-ai-productivity",
             "shadow": shadow, "consec_rejects": consec,
             "calls_day": {"day": time.strftime("%Y-%m-%d"),
-                          "calls": totals["model_calls"]}}))
+                          "calls": totals["model_calls"]},
+            "beyond_humans": 142}))
 
     def thought(kind, topic, rule, file, prs, comments=None):
         ph, rh = _demo_thought(kind, topic, rule, file, prs, comments)

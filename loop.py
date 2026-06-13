@@ -86,6 +86,7 @@ def persist(champion_eval, champ_fp, champ_size, split, corpus_offset, totals, *
         "fp_examples": fp_examples or [], "consec_rejects": consec_rejects,
         "synth_offset": synth_offset, "shadow": shadow, "calls_day": calls_day,
         "silver_offset": silver_offset,
+        "beyond_humans": outcomes.count_beyond_humans(),
     }
     tmp = config.STATE_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2))

@@ -198,7 +198,7 @@ def main():
     # ---- fake outcomes data ----
     config.WORKSPACE.mkdir(parents=True, exist_ok=True)
     (config.WORKSPACE / "outcomes.jsonl").write_text(json.dumps(
-        {"pr": 100, "path": "src/o.py", "body": "ai finding accepted", "outcome": "acted_on"}
+        {"pr": 100, "path": "src/o.py", "body": "ai finding accepted", "outcome": "acted_on", "beyond_human": True}
     ) + "\n" + json.dumps(
         {"pr": 101, "path": "src/p.py", "body": "ai finding rejected", "outcome": "dismissed"}
     ) + "\n")
@@ -220,6 +220,8 @@ def main():
     # ---- isolation ----
     check("SEED skill unchanged (isolation)", dir_hash(SEED) == seed_before)
     check("all writes confined to sandbox", str(config.WORKSPACE).startswith(str(TMP)))
+
+    check("beyond_humans counted in state", json.loads(config.STATE_FILE.read_text()).get("beyond_humans") == 1)
 
     # ---- ledger + rollback ----
     check("ledger recorded decisions", config.LEDGER_FILE.exists()
