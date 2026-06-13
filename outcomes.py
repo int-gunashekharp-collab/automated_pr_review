@@ -104,6 +104,13 @@ def mine_outcomes(run_gh=None) -> dict:
                 continue
                 
             threads = data.get("reviewThreads", [])
+            
+            human_paths = set()
+            for thread in threads:
+                comments = thread.get("comments", [])
+                if comments and comments[0].get("author", {}).get("login", "") != bot_login:
+                    human_paths.add(thread.get("path", ""))
+
             for thread in threads:
                 clf = classify_thread(thread, bot_login)
                 if not clf:
@@ -119,7 +126,8 @@ def mine_outcomes(run_gh=None) -> dict:
                     "path": clf["path"],
                     "body": clf["body"],
                     "outcome": clf["outcome"],
-                    "replies": clf["replies"]
+                    "replies": clf["replies"],
+                    "beyond_human": clf["path"] not in human_paths
                 }
                 f.write(json.dumps(rec) + "\n")
                 
@@ -140,6 +148,22 @@ def load_outcomes() -> dict[str, list[dict]]:
             outcome = rec.get('outcome')
             if outcome in res:
                 res[outcome].append(rec)
+        except Exception:
+            pass
+    return res
+
+def count_beyond_humans() -> int:
+    res = 0
+    f = _get_outcomes_file()
+    if not f.exists():
+        return 0
+    for line in f.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+            if rec.get("outcome") == "acted_on" and rec.get("beyond_human"):
+                res += 1
         except Exception:
             pass
     return res

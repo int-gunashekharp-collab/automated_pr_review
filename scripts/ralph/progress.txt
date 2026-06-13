@@ -38,3 +38,5 @@ iter 4 S2: brain proposed no files — skipped
 iter 5 S2: brain proposed no files — skipped
 smoke: GREEN after iteration 1
 iter 1 S2: GREEN — story DONE. Wired the output from `mine_outcomes` directly into the proposer's contexts. Smoke test validates that when LOOP_OUTCOMES=1, the stub strings correctly make it to the prompt. Iteration DONE.
+smoke: GREEN after iteration 2
+iter 2 S3: GREEN — partial slice kept. Added beyond_human boolean to outcomes.jsonl and a count_beyond_humans() helper. Smoke test covers the logic correctly. Still need to wire into state.json (via reporter) and update dashboard UI + simulator to display the stat.

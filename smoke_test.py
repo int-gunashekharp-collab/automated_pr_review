@@ -345,14 +345,30 @@ def _test_outcomes():
                     {"author": {"login": "snabbit-bot"}, "body": "Rebutted finding"},
                     {"author": {"login": "human"}, "body": "No I disagree"}
                   ]
+                },
+                {
+                  "isResolved": True,
+                  "path": "src/unique.py",
+                  "comments": [{"author": {"login": "snabbit-bot"}, "body": "Beyond human finding"}]
+                },
+                {
+                  "isResolved": True,
+                  "path": "src/main.py",
+                  "comments": [{"author": {"login": "human"}, "body": "Overlapping human"}]
                 }
               ]
             })
         return "[]"
     os.environ["LOOP_AI_REVIEWER_LOGIN"] = "snabbit-bot"
+    import config
+    of = config.WORKSPACE / "outcomes.jsonl"
+    if of.exists(): of.unlink()
     stats = outcomes.mine_outcomes(run_gh=fake_run_gh)
-    if stats.get("new_acted_on") != 1 or stats.get("new_dismissed") != 1:
+    if stats.get("new_acted_on") != 2 or stats.get("new_dismissed") != 1:
         print(f"SMOKE TEST FAILED: outcomes stats incorrect: {stats}")
+        sys.exit(1)
+    if outcomes.count_beyond_humans() != 1:
+        print(f"SMOKE TEST FAILED: beyond_humans count incorrect: {outcomes.count_beyond_humans()}")
         sys.exit(1)
     print("  [PASS] extracted acted_on and dismissed stats")
     
