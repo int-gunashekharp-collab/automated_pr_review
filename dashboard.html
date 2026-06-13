@@ -373,6 +373,9 @@
       <div class="kcell" style="grid-column:span 2"><div class="t">human-parity · corpus shadow recall</div>
         <div class="v" id="kShadow">—</div>
         <div class="sub" id="kShadowSub">of bugs your humans caught, fraction the AI catches (reported, never gates)</div></div>
+      <div class="kcell" style="grid-column:span 2"><div class="t">caught beyond humans</div>
+        <div class="v" id="kBeyond">—</div>
+        <div class="sub" id="kBeyondSub">acted-on AI findings with no overlapping human comment</div></div>
       <div class="kcell" style="grid-column:span 2"><div class="t">session totals</div>
         <div class="sub" style="font-size:11.5px;color:#46536b;line-height:1.8" id="kTotals">—</div></div>
     </div>
@@ -658,6 +661,8 @@ function renderVitals(s) {
     $("kShadowSub").textContent =
       `window of ${sh.checked} resolved human catches (pool ${sh.total_pool ? sh.total_pool.toLocaleString() : "?"}) · ${ago(sh.ts)}`;
   }
+  const bh = state.beyond_humans;
+  $("kBeyond").textContent = bh == null ? "—" : bh.toLocaleString();
   const t = state.totals;
   if (t) $("kTotals").innerHTML =
     `iterations <b style="color:var(--txt);font-weight:500">${t.iters}</b> · promoted <b style="color:var(--grn);font-weight:500">${t.promotions}</b> ` +

@@ -42,3 +42,5 @@ smoke: GREEN after iteration 2
 iter 2 S3: GREEN — partial slice kept. Added beyond_human boolean to outcomes.jsonl and a count_beyond_humans() helper. Smoke test covers the logic correctly. Still need to wire into state.json (via reporter) and update dashboard UI + simulator to display the stat.
 smoke: GREEN after iteration 3
 iter 3 S3: GREEN — partial slice kept. Fixed the smoke_test crash (checking state after rollback). Wired beyond_humans into state and API. Next iteration needs dashboard.html to update the UI and mark the story done.
+smoke: GREEN after iteration 4
+iter 4 S3: GREEN — story DONE. Finished UI integration for S3. Marked story done.

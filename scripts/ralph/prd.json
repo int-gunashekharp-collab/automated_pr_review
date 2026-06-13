@@ -37,7 +37,7 @@
     {
       "id": "S3",
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "title": "Caught-beyond-humans counter",
       "asA": "team lead",
       "iWant": "a verified count of AI findings that no human raised and the author still fixed",
