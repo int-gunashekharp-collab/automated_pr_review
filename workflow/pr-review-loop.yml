@@ -1,0 +1,83 @@
+# Scheduled, BOUNDED run of the self-improving PR-reviewer loop.
+#
+# This is the CI complement to the always-on local daemon. Each run re-seeds
+# from the CURRENT live conventions skill (--fresh), explores a few iterations
+# with Gemini 3.1 Pro on Vertex, and uploads any rubric improvement it found as
+# an artifact for you to review. It NEVER edits the live skill — the workspace
+# is the loop's own copy and is git-ignored.
+#
+# To ACTIVATE: copy this file to .github/workflows/pr-review-loop.yml.
+# (Kept here so it doesn't touch your existing workflow set until you choose to.)
+#
+# Reuses the same Vertex Workload Identity Federation auth as auto-review.yml —
+# no key files. Optional: add a LOOP_REPORT_WEBHOOK repo secret (Slack incoming
+# webhook) to get the digest pushed to a channel.
+
+name: PR Reviewer Self-Improvement Loop
+
+on:
+  workflow_dispatch:
+    inputs:
+      iters:
+        description: "Iterations to run this invocation"
+        default: "2"
+  schedule:
+    - cron: "0 */6 * * *" # every 6h — the always-on path is the local daemon
+
+concurrency:
+  group: pr-review-loop
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: read
+  id-token: write # required for Vertex WIF
+
+jobs:
+  improve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # eval_pr_reviewer fetches historical PR diffs via gh
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the Vertex client (loop itself is pure stdlib)
+        run: pip install google-genai
+
+      - name: Authenticate to Google Cloud (Vertex WIF — no keys)
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: snabbit-ai-productivity
+          workload_identity_provider: projects/688761844433/locations/global/workloadIdentityPools/github-actions-pool/providers/github-oidc
+          service_account: vertex-agent-runner@snabbit-ai-productivity.iam.gserviceaccount.com
+
+      - name: Run bounded improvement loop
+        env:
+          GOOGLE_CLOUD_PROJECT: snabbit-ai-productivity
+          GEMINI_MODEL: gemini-3.1-pro-preview
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # gh api for historical diffs
+          LOOP_REPORT_WEBHOOK: ${{ secrets.LOOP_REPORT_WEBHOOK }} # optional
+          LOOP_REPORT_INTERVAL_SEC: "0" # emit a digest at the end of the bounded run
+        run: |
+          python3 pr-review-loop/loop.py --fresh \
+            --max-iters "${{ github.event.inputs.iters || '2' }}"
+
+      - name: Upload improved rubric + reports (review before adopting)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-review-loop-${{ github.run_id }}
+          path: |
+            pr-review-loop/workspace/champion-skill/
+            pr-review-loop/reports/
+            pr-review-loop/workspace/attempts.jsonl
+            pr-review-loop/workspace/ledger.jsonl
+          if-no-files-found: warn
+          retention-days: 30
+          # reports/ already includes reports/proposal/ — the PR-ready adoption
+          # bundle (PROPOSAL.md + rubric.diff + champion-skill copy)

@@ -1,0 +1,849 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PR-reviewer loop — mission control</title>
+<style>
+  :root{
+    --bg:#f5f6fa; --panel:#ffffff; --panel2:#f3f5f9;
+    --line:rgba(16,24,40,.08); --line2:rgba(16,24,40,.16);
+    --cyan:#1290e0; --cyan-dim:rgba(18,144,224,.45);
+    --txt:#1a2233; --mut:#5d6b85; --mut2:#98a2b8;
+    --grn:#0fa573; --red:#e5604f; --amb:#c98a0a; --pur:#7a5af8;
+    --aurora:linear-gradient(100deg,#1290e0 0%,#0fa573 52%,#7a5af8 100%);
+    --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+    --mono:"SF Mono",ui-monospace,SFMono-Regular,"JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  ::selection{background:rgba(18,144,224,.16)}
+  body{
+    background:var(--bg);color:var(--txt);font-family:var(--sans);font-size:13px;
+    -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+    background-image:
+      radial-gradient(900px 520px at 78% -14%, rgba(18,144,224,.045), transparent 62%),
+      radial-gradient(820px 560px at -12% 112%, rgba(122,90,248,.035), transparent 60%),
+      radial-gradient(rgba(70,90,140,.07) 1px, transparent 1.2px);
+    background-size:auto,auto,26px 26px;
+    min-height:100vh;padding:20px 24px 36px;
+  }
+  ::-webkit-scrollbar{width:8px;height:8px}
+  ::-webkit-scrollbar-thumb{background:#d6dbe6;border-radius:99px}
+  ::-webkit-scrollbar-thumb:hover{background:#c2c9d9}
+  ::-webkit-scrollbar-track{background:transparent}
+
+  /* ---------- top bar ---------- */
+  .top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:16px}
+  .orb{width:9px;height:9px;border-radius:50%;background:var(--grn);position:relative;flex:none;
+       animation:breath 2.6s ease-in-out infinite}
+  .orb::after{content:"";position:absolute;inset:-5px;border-radius:50%;border:1px solid var(--grn);
+              opacity:.35;animation:halo 2.6s ease-out infinite}
+  .orb.off{background:var(--red);animation:none}
+  .orb.off::after{border-color:var(--red);animation:none;opacity:.3}
+  .orb.warn{background:var(--amb)} .orb.warn::after{border-color:var(--amb)}
+  @keyframes breath{0%,100%{opacity:1}50%{opacity:.55}}
+  @keyframes halo{0%{transform:scale(.55);opacity:.45}80%{transform:scale(1.45);opacity:0}100%{opacity:0}}
+  h1{font-size:13px;font-weight:600;letter-spacing:.3em;text-transform:uppercase;color:var(--txt)}
+  h1 b{font-weight:600;background:var(--aurora);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .chip{border:1px solid var(--line);border-radius:999px;padding:4px 12px;font-size:11px;
+        color:var(--mut);white-space:nowrap;background:#ffffff;font-variant-numeric:tabular-nums;
+        box-shadow:0 1px 2px rgba(16,24,40,.04)}
+  .chip b{color:var(--txt);font-weight:500}
+  .chip.live b{color:var(--grn)}
+  .chip.demo{border-color:rgba(122,90,248,.35);color:var(--pur);background:rgba(122,90,248,.06)}
+  .alert{border:1px solid rgba(229,96,79,.35);color:var(--red);border-radius:999px;padding:4px 12px;
+         font-size:11px;background:rgba(229,96,79,.07)}
+  .alert.amb{border-color:rgba(201,138,10,.35);color:var(--amb);background:rgba(201,138,10,.07)}
+  .spacer{flex:1}
+
+  /* ---------- pipeline ---------- */
+  .pipe-wrap{border:1px solid var(--line);border-radius:14px;background:var(--panel);
+             padding:14px 18px;margin-bottom:16px;position:relative;
+             overflow:hidden;box-shadow:0 1px 2px rgba(16,24,40,.04), 0 8px 28px rgba(16,24,40,.05)}
+  .pipe-wrap::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;
+                     background:var(--aurora);opacity:.85}
+  .pipe{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+  .ph{padding:5px 13px;border:1px solid transparent;border-radius:999px;color:var(--mut2);
+      font-size:10px;font-weight:500;letter-spacing:.14em;text-transform:uppercase;transition:all .35s}
+  .ph.done{color:rgba(18,144,224,.5)}
+  .ph.act{color:var(--cyan);border-color:rgba(18,144,224,.4);background:rgba(18,144,224,.07);
+          animation:soft 1.8s ease-in-out infinite}
+  @keyframes soft{0%,100%{box-shadow:0 0 0 3px rgba(18,144,224,.06)}50%{box-shadow:0 0 0 5px rgba(18,144,224,.12)}}
+  .arrow{color:#c3cad9;font-size:9px}
+  .kind{margin-left:auto;padding:4px 13px;border-radius:999px;font-size:10px;font-weight:500;
+        letter-spacing:.14em;text-transform:uppercase;border:1px solid}
+  .kind.corpus{color:var(--pur);border-color:rgba(122,90,248,.35);background:rgba(122,90,248,.06)}
+  .kind.propose{color:var(--cyan);border-color:rgba(18,144,224,.35);background:rgba(18,144,224,.06)}
+  .kind.consolidate{color:var(--amb);border-color:rgba(201,138,10,.35);background:rgba(201,138,10,.06)}
+  .pdetail{margin-top:10px;color:var(--mut);font-size:12px;display:flex;gap:18px;flex-wrap:wrap;
+           align-items:center;font-variant-numeric:tabular-nums}
+  .pbar{flex:1;min-width:180px;height:4px;background:#eceff5;border-radius:99px;overflow:hidden}
+  .pbar i{display:block;height:100%;background:var(--aurora);width:0%;transition:width .45s;border-radius:99px}
+
+  /* ---------- grid + panels ---------- */
+  .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:16px}
+  .panel{border:1px solid var(--line);border-radius:14px;background:var(--panel);
+         padding:16px 18px;position:relative;min-width:0;
+         box-shadow:0 1px 2px rgba(16,24,40,.04), 0 10px 32px rgba(16,24,40,.05);
+         transition:border-color .3s, box-shadow .3s}
+  .panel:hover{border-color:rgba(16,24,40,.14);box-shadow:0 1px 2px rgba(16,24,40,.05), 0 14px 40px rgba(16,24,40,.08)}
+  .label{font-size:10px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:var(--mut);
+         margin-bottom:14px;display:flex;align-items:center;gap:9px}
+  .label .idx{color:var(--cyan);font-variant-numeric:tabular-nums;letter-spacing:.1em}
+  .label .idx::after{content:"";display:inline-block;width:14px;height:1px;background:var(--line2);
+                     vertical-align:middle;margin-left:9px}
+  .label .lr{margin-left:auto;letter-spacing:.02em;text-transform:none;color:var(--mut2);font-weight:400}
+  .s7{grid-column:span 7}.s5{grid-column:span 5}.s12{grid-column:span 12}
+  @media(max-width:1100px){.s7,.s5{grid-column:span 12}}
+
+  /* ---------- thinking ---------- */
+  .th-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+  .tag{padding:2px 10px;border-radius:999px;font-size:9.5px;font-weight:500;letter-spacing:.12em;
+       text-transform:uppercase;border:1px solid}
+  .tag.corpus{color:var(--pur);border-color:rgba(122,90,248,.35);background:rgba(122,90,248,.05)}
+  .tag.propose{color:var(--cyan);border-color:rgba(18,144,224,.35);background:rgba(18,144,224,.05)}
+  .tag.consolidate{color:var(--amb);border-color:rgba(201,138,10,.35);background:rgba(201,138,10,.05)}
+  .th-meta{color:var(--mut2);font-size:11px;font-variant-numeric:tabular-nums}
+  .th-text{font-family:var(--mono);font-size:13px;line-height:1.85;color:var(--txt);min-height:74px;
+           white-space:pre-wrap}
+  .caret{display:inline-block;width:7px;height:14px;background:var(--cyan);vertical-align:-2px;
+         margin-left:4px;border-radius:1px;animation:blink 1.1s steps(1) infinite}
+  @keyframes blink{50%{opacity:0}}
+  details{margin-top:10px;border:1px solid var(--line);border-radius:10px;overflow:hidden;
+          background:#fbfcfe}
+  summary{cursor:pointer;padding:8px 13px;color:var(--mut2);font-size:10px;font-weight:500;
+          letter-spacing:.12em;text-transform:uppercase;user-select:none;transition:color .2s}
+  summary:hover{color:var(--cyan)}
+  .raw{padding:11px 13px;border-top:1px solid var(--line);background:var(--panel2);
+       color:#4a5872;font-family:var(--mono);font-size:11.5px;line-height:1.65;white-space:pre-wrap;
+       max-height:260px;overflow:auto}
+  .th-hist{margin-top:14px;border-top:1px solid var(--line);padding-top:10px;max-height:190px;overflow:auto}
+  .th-row{display:flex;gap:10px;align-items:baseline;padding:6px 2px;color:var(--mut2);font-size:11.5px;
+          border-bottom:1px solid rgba(16,24,40,.05);cursor:pointer;transition:color .15s}
+  .th-row:hover{color:var(--txt)}
+  .th-row .r{color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+  .th-row:hover .r{color:var(--txt)}
+
+  /* ---------- KPIs ---------- */
+  .kgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .kcell{border:1px solid rgba(16,24,40,.06);border-radius:11px;padding:11px 13px;
+         background:#f7f9fc}
+  .kcell .t{font-size:9.5px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;
+            color:var(--mut);margin-bottom:7px}
+  .kcell .v{font-size:23px;font-weight:300;color:var(--txt);font-variant-numeric:tabular-nums;
+            letter-spacing:-.01em}
+  .kcell .v small{font-size:11px;color:var(--mut2);font-weight:400;letter-spacing:0}
+  .kcell .sub{font-size:10.5px;color:var(--mut2);margin-top:4px;line-height:1.5}
+  .ring-wrap{display:flex;align-items:center;gap:16px;grid-column:span 2;
+             border:1px solid rgba(16,24,40,.06);border-radius:11px;padding:12px 13px;
+             background:#f7f9fc}
+  .bar{height:4px;background:#eceff5;border-radius:99px;overflow:hidden;margin-top:8px}
+  .bar i{display:block;height:100%;width:0%;transition:width .6s;border-radius:99px}
+  .bar.cyan i{background:var(--cyan)}
+  .bar.grn i{background:var(--grn)}
+  .bar.amb i{background:var(--amb)}
+  .bar.pur i{background:var(--pur)}
+  .good{color:var(--grn)!important}.bad{color:var(--red)!important}.warn{color:var(--amb)!important}
+
+  /* ---------- chart ---------- */
+  .chart-box{position:relative}
+  #chart{width:100%;height:230px;display:block}
+  .tip{position:absolute;pointer-events:none;background:#ffffff;border:1px solid var(--line2);
+       border-radius:10px;padding:9px 12px;font-size:11px;color:var(--txt);display:none;z-index:5;
+       white-space:nowrap;box-shadow:0 12px 32px rgba(16,24,40,.14);font-variant-numeric:tabular-nums}
+  .legend{display:flex;gap:16px;font-size:10.5px;color:var(--mut2);margin-top:8px}
+  .legend i{display:inline-block;width:14px;height:2px;border-radius:2px;vertical-align:middle;margin-right:6px}
+
+  /* ---------- gates ---------- */
+  .gate{display:flex;align-items:center;gap:10px;padding:7px 2px;font-size:12px;color:var(--mut);
+        border-bottom:1px solid rgba(16,24,40,.05)}
+  .gate:last-child{border-bottom:none}
+  .gate .ic{width:16px;text-align:center;font-size:11px}
+  .gate.ok .ic{color:var(--grn)}.gate.ok{color:#3f4d66}
+  .gate.fail .ic{color:var(--red)}.gate.fail{color:var(--red)}
+  .gate.na .ic{color:var(--mut2)}
+  .gate .why{margin-left:auto;font-size:10px;color:var(--mut2);text-align:right}
+
+  /* ---------- matrix ---------- */
+  .mx-scroll{overflow-x:auto;padding-bottom:4px}
+  table.mx{border-collapse:collapse;font-size:10px}
+  .mx td,.mx th{padding:0;border:none}
+  .mx th{color:var(--mut2);font-weight:400;text-align:right;padding-right:9px;font-size:10.5px;
+         height:17px;font-family:var(--mono)}
+  .mx th.val{color:var(--grn)}
+  .mx th.sil{color:var(--pur)}
+  .cell{width:17px;height:14px;border-radius:3.5px;margin:1px;display:block}
+  .cell.p{background:rgba(15,165,115,.30)}
+  .cell.f{background:rgba(229,96,79,.24)}
+  .cell.n{background:#edf0f6}
+  .cell.flip{box-shadow:inset 0 0 0 1px var(--amb)}
+  .mx .colhead{writing-mode:vertical-rl;transform:rotate(180deg);color:var(--mut2);font-size:9px;
+               padding:2px 0;text-align:left;height:auto;font-family:var(--mono)}
+  .mx .acc{color:var(--grn)}
+
+  /* ---------- feed ---------- */
+  .feed{max-height:430px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding-right:2px}
+  .fitem{border:1px solid rgba(16,24,40,.07);border-left:2px solid var(--mut2);border-radius:10px;
+         padding:9px 12px;background:#fbfcfe}
+  .fitem.acc{border-left-color:var(--grn)}
+  .fitem.rej{border-left-color:var(--red)}
+  .fitem.err{border-left-color:var(--amb)}
+  .fitem.inf{border-left-color:var(--pur)}
+  .fitem .l1{display:flex;gap:9px;align-items:baseline;flex-wrap:wrap}
+  .fitem .it{color:var(--mut2);font-size:10.5px;font-family:var(--mono)}
+  .fitem .st{font-size:9.5px;font-weight:500;letter-spacing:.12em;text-transform:uppercase}
+  .fitem.acc .st{color:var(--grn)}.fitem.rej .st{color:var(--red)}.fitem.err .st{color:var(--amb)}
+  .fitem.inf .st{color:var(--pur)}
+  .fitem .rs{color:#46536b;font-size:11.5px;margin-top:4px;line-height:1.55}
+  .fitem .dl{color:var(--mut2);font-size:10px;margin-top:4px;display:flex;gap:12px;flex-wrap:wrap;
+             font-variant-numeric:tabular-nums}
+  .fitem .ago{margin-left:auto;color:var(--mut2);font-size:10px;font-variant-numeric:tabular-nums}
+
+  /* ---------- rubric / history ---------- */
+  .rfile{display:flex;align-items:center;gap:12px;font-size:11.5px;color:var(--mut);padding:5px 0}
+  .rfile .nm{width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--mut);
+             font-family:var(--mono);font-size:11px}
+  .rfile .rb{flex:1;height:3px;background:#eceff5;border-radius:99px;overflow:hidden}
+  .rfile .rb i{display:block;height:100%;background:var(--cyan);opacity:.75;border-radius:99px}
+  .rfile .ch{width:62px;text-align:right;color:var(--mut2);font-size:10.5px;font-variant-numeric:tabular-nums}
+  .hist-list{max-height:180px;overflow-y:auto}
+  .hrow{display:flex;align-items:center;gap:10px;padding:6px 2px;font-size:11px;color:var(--mut);
+        border-bottom:1px solid rgba(16,24,40,.05);font-family:var(--mono)}
+  .hrow button{background:#ffffff;border:1px solid var(--line2);color:var(--mut);border-radius:999px;
+               font-family:var(--sans);font-size:10px;padding:3px 11px;cursor:pointer;margin-left:auto;
+               transition:all .2s}
+  .hrow button:hover{color:var(--cyan);border-color:rgba(18,144,224,.45)}
+  .miss{display:flex;gap:9px;align-items:baseline;padding:6px 2px;font-size:11.5px;color:var(--mut);
+        border-bottom:1px solid rgba(16,24,40,.05)}
+  .miss .id{color:var(--red);width:40px;font-family:var(--mono);font-size:11px}
+  .miss .vt{font-size:8.5px;font-weight:500;letter-spacing:.08em;border:1px solid rgba(15,165,115,.4);
+            color:var(--grn);border-radius:99px;padding:1px 7px;text-transform:uppercase}
+  .miss .bg{color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+
+  /* ---------- hero / footer ---------- */
+  .hero{border:1px dashed var(--line2);border-radius:14px;padding:44px;text-align:center;
+        color:var(--mut);margin-bottom:16px;display:none}
+  .hero b{color:var(--cyan);font-weight:500}
+  .hero code{color:var(--grn);font-family:var(--mono);font-size:12px}
+  .foot{margin-top:18px;display:flex;gap:20px;flex-wrap:wrap;color:var(--mut2);font-size:10.5px}
+  .foot b{color:var(--mut);font-weight:400}
+  @media (prefers-reduced-motion: reduce){
+    .orb,.orb::after,.ph.act,.caret{animation:none}
+  }
+</style>
+</head>
+<body>
+
+<div class="top">
+  <div class="orb" id="orb"></div>
+  <h1>PR-reviewer <b>loop</b></h1>
+  <span class="chip demo" id="demoBadge" style="display:none">demo data</span>
+  <span class="chip" id="iterChip">iter <b>—</b></span>
+  <span class="chip" id="uptimeChip">uptime <b>—</b></span>
+  <span class="chip" id="modelChip">—</span>
+  <div class="spacer"></div>
+  <span id="alerts" style="display:flex;gap:8px;flex-wrap:wrap"></span>
+  <span class="chip live" id="conn">link <b>connecting…</b></span>
+</div>
+
+<div class="hero" id="hero">
+  <p style="font-size:14px;margin-bottom:10px">awaiting first run — no loop telemetry yet</p>
+  <p>start the loop: <code>python3 loop.py --max-iters 5</code> &nbsp;·&nbsp;
+     or preview with synthetic data: <code>python3 dashboard_server.py --demo</code></p>
+</div>
+
+<div class="pipe-wrap" id="pipeWrap">
+  <div class="pipe" id="pipeline"></div>
+  <div class="pdetail">
+    <span id="phaseDetail">—</span>
+    <div class="pbar" id="evalBarWrap" style="display:none"><i id="evalBar"></i></div>
+    <span id="evalText"></span>
+  </div>
+</div>
+
+<div class="grid">
+
+  <div class="panel s7">
+    <div class="label"><span class="idx">01</span>cortex — what gemini is thinking <span class="lr" id="thAgo"></span></div>
+    <div class="th-head">
+      <span class="tag propose" id="thKind">—</span>
+      <span class="th-meta" id="thMeta">no proposer calls captured yet</span>
+    </div>
+    <div class="th-text" id="thText"><span style="color:var(--mut2)">waiting for the first Gemini call…</span><span class="caret"></span></div>
+    <details><summary>raw model output</summary><div class="raw" id="thRaw">—</div></details>
+    <details><summary>prompt context (head)</summary><div class="raw" id="thPrompt">—</div></details>
+    <div class="th-hist" id="thHist"></div>
+  </div>
+
+  <div class="panel s5">
+    <div class="label"><span class="idx">02</span>champion vitals</div>
+    <div class="kgrid">
+      <div class="ring-wrap">
+        <svg width="86" height="86" viewBox="0 0 86 86">
+          <defs><linearGradient id="rg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="#1290e0"/><stop offset="100%" stop-color="#0fa573"/>
+          </linearGradient></defs>
+          <circle cx="43" cy="43" r="36" fill="none" stroke="#e9edf4" stroke-width="6"/>
+          <circle id="ring" cx="43" cy="43" r="36" fill="none" stroke="url(#rg)" stroke-width="6"
+                  stroke-linecap="round" stroke-dasharray="226.2" stroke-dashoffset="226.2"
+                  transform="rotate(-90 43 43)" style="transition:stroke-dashoffset .8s"/>
+          <text id="ringTxt" x="43" y="48" text-anchor="middle" fill="#1a2233"
+                font-size="17" font-weight="500" font-family="inherit">—</text>
+        </svg>
+        <div>
+          <div class="t" style="font-size:9.5px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:var(--mut)">overall recall</div>
+          <div class="v" style="font-size:14px;font-weight:400;margin-top:4px;color:var(--mut)" id="kPassed">— / —</div>
+          <div class="sub" style="font-size:10.5px;color:var(--mut2);margin-top:3px" id="kBase"></div>
+          <div class="sub" style="font-size:10.5px;color:var(--pur);margin-top:3px" id="kEvalSet"></div>
+        </div>
+      </div>
+      <div class="kcell"><div class="t">val recall · honest</div><div class="v" id="kVal">—</div>
+        <div class="bar grn"><i id="kValBar"></i></div></div>
+      <div class="kcell"><div class="t">train recall</div><div class="v" id="kTrain">—</div>
+        <div class="bar cyan"><i id="kTrainBar"></i></div></div>
+      <div class="kcell"><div class="t">false-positive rate</div><div class="v" id="kFP">—</div>
+        <div class="sub" id="kFPSub">on fixed diffs</div></div>
+      <div class="kcell"><div class="t">noise / review</div><div class="v" id="kNoise">—</div>
+        <div class="sub" id="kNoiseSub">mean findings</div></div>
+      <div class="kcell"><div class="t">rubric size</div><div class="v" id="kSize">—</div>
+        <div class="bar amb"><i id="kSizeBar"></i></div><div class="sub" id="kSizeSub"></div></div>
+      <div class="kcell"><div class="t">corpus consumed</div><div class="v" id="kCorpus">—</div>
+        <div class="bar pur"><i id="kCorpusBar"></i></div><div class="sub" id="kCorpusSub">mined human comments</div></div>
+      <div class="kcell" style="grid-column:span 2"><div class="t">human-parity · corpus shadow recall</div>
+        <div class="v" id="kShadow">—</div>
+        <div class="sub" id="kShadowSub">of bugs your humans caught, fraction the AI catches (reported, never gates)</div></div>
+      <div class="kcell" style="grid-column:span 2"><div class="t">session totals</div>
+        <div class="sub" style="font-size:11.5px;color:#46536b;line-height:1.8" id="kTotals">—</div></div>
+    </div>
+  </div>
+
+  <div class="panel s7">
+    <div class="label"><span class="idx">03</span>recall trajectory <span class="lr">per decided iteration</span></div>
+    <div class="chart-box">
+      <svg id="chart"></svg>
+      <div class="tip" id="chartTip"></div>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--cyan)"></i>train</span>
+      <span><i style="background:var(--grn)"></i>val (held-out)</span>
+      <span><i style="background:rgba(93,107,133,.45);height:1px;border-top:1px dashed rgba(93,107,133,.45)"></i>overall</span>
+      <span style="color:var(--grn)">◆ promotion</span>
+    </div>
+  </div>
+
+  <div class="panel s5">
+    <div class="label"><span class="idx">04</span>promotion gates — last verdict <span class="lr" id="gatesIter"></span></div>
+    <div id="gates"><div class="gate na"><span class="ic">○</span>no decided iteration yet</div></div>
+    <div class="label" style="margin-top:16px">still chasing <span class="lr">champion misses</span></div>
+    <div id="misses" style="max-height:150px;overflow-y:auto"></div>
+  </div>
+
+  <div class="panel s7">
+    <div class="label"><span class="idx">05</span>golden-case matrix <span class="lr">rows: cases · cols: iterations · right: champion</span></div>
+    <div class="mx-scroll" id="matrix"><span style="color:var(--mut2);font-size:11.5px">no per-case telemetry yet (appears after the first decided iteration)</span></div>
+  </div>
+
+  <div class="panel s5">
+    <div class="label"><span class="idx">06</span>decision feed <span class="lr" id="feedCount"></span></div>
+    <div class="feed" id="feed"></div>
+  </div>
+
+  <div class="panel s7">
+    <div class="label"><span class="idx">07</span>rubric anatomy <span class="lr" id="rubricTotal"></span></div>
+    <div id="rubricFiles"></div>
+  </div>
+
+  <div class="panel s5">
+    <div class="label"><span class="idx">08</span>promotion history <span class="lr">click = copy rollback cmd</span></div>
+    <div class="hist-list" id="histList"><span style="color:var(--mut2);font-size:11.5px">no snapshots yet</span></div>
+  </div>
+
+</div>
+
+<div class="foot">
+  <span>workspace <b id="fWs">—</b></span>
+  <span>maestro-core <b id="fRoot">—</b></span>
+  <span>model <b id="fModel">—</b></span>
+  <span>project <b id="fProj">—</b></span>
+  <span>mode <b id="fMode">—</b></span>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtK = n => n == null ? "—" : (n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n));
+const pct = (x, d = 0) => x == null ? "—" : (x * 100).toFixed(d) + "%";
+
+let snap = null, recvWall = 0, pinnedThought = null, lastThoughtKey = null, twTimer = null;
+
+function serverNow() { return snap ? snap.now + (Date.now() - recvWall) / 1000 : 0; }
+function ago(ts) {
+  if (!ts || !snap) return "";
+  let d = Math.max(0, serverNow() - ts);
+  if (d < 60) return Math.floor(d) + "s ago";
+  if (d < 3600) return Math.floor(d / 60) + "m " + Math.floor(d % 60) + "s ago";
+  return Math.floor(d / 3600) + "h " + Math.floor((d % 3600) / 60) + "m ago";
+}
+function dur(sec) {
+  if (sec == null) return "—";
+  sec = Math.max(0, sec);
+  if (sec < 3600) return Math.floor(sec / 60) + "m " + Math.floor(sec % 60) + "s";
+  return Math.floor(sec / 3600) + "h " + Math.floor((sec % 3600) / 60) + "m";
+}
+
+/* ---------------- connection ---------------- */
+let pollT = null;
+function setConn(t) { $("conn").innerHTML = `link <b>${esc(t)}</b>`; }
+function startPolling() {
+  if (pollT) return;
+  const tick = async () => {
+    try { const r = await fetch("/api/snapshot"); render(await r.json()); setConn("polling"); }
+    catch (e) { setConn("server offline"); }
+  };
+  tick(); pollT = setInterval(tick, 2000);
+}
+function connect() {
+  let es;
+  try { es = new EventSource("/api/stream"); } catch (e) { return startPolling(); }
+  es.onmessage = e => { setConn("live · sse"); render(JSON.parse(e.data)); };
+  es.onerror = () => { es.close(); startPolling(); };
+}
+
+/* ---------------- pipeline ---------------- */
+const PHASES = ["plan", "extract", "proposing", "screening", "confirming", "precision", "deciding"];
+function buildPipeline() {
+  $("pipeline").innerHTML = PHASES.map((p, i) =>
+    `<span class="ph" id="ph-${p}">${p}</span>` +
+    (i < PHASES.length - 1 ? `<span class="arrow">▸</span>` : "")
+  ).join("") + `<span class="kind propose" id="kindBadge" style="display:none">—</span>`;
+}
+function renderPipeline(st, fresh) {
+  PHASES.forEach(p => { const el = $("ph-" + p); el.className = "ph"; });
+  const kb = $("kindBadge"), pd = $("phaseDetail");
+  const ebw = $("evalBarWrap"), eb = $("evalBar"), et = $("evalText");
+  ebw.style.display = "none"; et.textContent = "";
+  if (!st) { pd.textContent = "no heartbeat yet — loop has not run"; kb.style.display = "none"; return; }
+  if (st.kind) { kb.style.display = ""; kb.className = "kind " + st.kind; kb.textContent = st.kind; }
+  else kb.style.display = "none";
+
+  const idx = PHASES.indexOf(st.phase);
+  if (idx >= 0) {
+    PHASES.forEach((p, i) => { if (i < idx) $("ph-" + p).classList.add("done"); });
+    if (fresh) $("ph-" + st.phase).classList.add("act");
+    else $("ph-" + st.phase).classList.add("done");
+  } else if (st.phase === "decided" || st.phase === "idle") {
+    PHASES.forEach(p => $("ph-" + p).classList.add("done"));
+  }
+
+  const el = Math.floor(Math.max(0, serverNow() - st.ts));
+  if (!fresh) {
+    pd.innerHTML = `<span style="color:var(--red)">no heartbeat</span> — last phase “${esc(st.phase)}” · ${ago(st.ts)} (long Vertex call with retries, or the loop stopped — check the loop terminal)`;
+  } else if (st.phase === "decided") {
+    const ok = st.status === "accepted";
+    pd.innerHTML = `iter #${st.iter} decided: <span style="color:${ok ? "var(--grn)" : "var(--red)"}">${esc(st.status)}</span> — ${esc(st.reason || "")}`;
+  } else if (st.phase === "idle") {
+    pd.textContent = `idle — next iteration ${st.resume_at ? "in " + Math.max(0, Math.round(st.resume_at - serverNow())) + "s" : "soon"}`;
+  } else if (st.phase === "startup") { pd.textContent = "starting up — loading golden set + corpus…";
+  } else if (st.phase === "baseline") { pd.textContent = `measuring the baseline rubric (${st.cases || "?"} cases × ${st.trials || "?"} trials)…`;
+  } else if (st.phase === "stopped") { pd.textContent = "loop finished its bounded run (stopped cleanly)";
+  } else if (st.phase === "error") { pd.innerHTML = `<span style="color:var(--amb)">iteration error</span> — ${esc(st.reason || "")}`;
+  } else {
+    const what = { plan: "choosing the mutation kind", extract: `pulling human comments from the corpus (offset ${st.offset ?? "?"})`,
+      proposing: "Gemini is reasoning about a rubric edit", screening: "cheap screen on targeted cases",
+      confirming: `full confirm — ${st.cases || "?"} cases × ${st.trials || "?"} trials, majority vote`,
+      precision: "checking false positives on fixed diffs", deciding: "running every promotion gate",
+      exporting: "writing the human-reviewable proposal bundle",
+      "shadow-eval": `human-parity shadow eval — ${st.cases || "?"} mined human catches`,
+      "budget-idle": `daily Gemini budget spent (${st.spent ?? "?"}/${st.budget ?? "?"}) — idling` }[st.phase] || st.phase;
+    const extra = (st.beam ? ` · beam ${st.beam}${st.of ? "/" + st.of : ""}` : "") +
+      (st.plateau === true ? " · plateau mode" : (typeof st.plateau === "number" && st.plateau > 0 ? ` · ${st.plateau} rejects in a row` : ""));
+    pd.textContent = `iter #${st.iter ?? "?"} · ${what}${extra} · ${el}s in this phase`;
+  }
+  if (fresh && st.eval && st.eval.n_cases) {
+    const e = st.eval, total = e.n_cases * (e.trials || 1),
+      donePos = (e.case_idx - 1) * (e.trials || 1) + (e.trial || 1);
+    ebw.style.display = ""; eb.style.width = Math.round(100 * donePos / total) + "%";
+    et.textContent = `${e.label || ""} · case ${e.case} (${e.case_idx}/${e.n_cases}) · trial ${e.trial}/${e.trials}`;
+  }
+}
+
+/* ---------------- thinking ---------------- */
+function parseRationale(t) {
+  let rat = null, edits = [];
+  try {
+    const j = JSON.parse(t.response_head);
+    rat = j.rationale; edits = Array.isArray(j.edits) ? j.edits : [];
+  } catch (e) {
+    const m = /"rationale"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(t.response_head || "");
+    if (m) try { rat = JSON.parse('"' + m[1] + '"'); } catch (_) { rat = m[1]; }
+    const fm = /"file"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(t.response_head || "");
+    const am = /"action"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(t.response_head || "");
+    if (fm) edits = [{ file: fm[1], action: am ? am[1] : "edit" }];
+  }
+  return { rat: rat || "(no rationale captured)", edits };
+}
+function thoughtText(t) {
+  const { rat, edits } = parseRationale(t);
+  let s = rat;
+  if (edits.length) s += "\n" + edits.map(e => `→ ${e.action || "edit"} → ${e.file || "?"}`).join("\n");
+  else if (t.kind === "corpus") s += "\n→ no edit proposed for this batch";
+  return s;
+}
+function typewrite(el, text) {
+  clearInterval(twTimer);
+  const caret = `<span class="caret"></span>`;
+  let i = 0;
+  twTimer = setInterval(() => {
+    i = Math.min(text.length, i + 3);
+    el.innerHTML = esc(text.slice(0, i)) + caret;
+    if (i >= text.length) clearInterval(twTimer);
+  }, 16);
+}
+function displayThought(t, animate) {
+  $("thKind").className = "tag " + (t.kind || "propose");
+  $("thKind").textContent = t.kind || "?";
+  $("thAgo").textContent = ago(t.ts);
+  $("thMeta").textContent = `read ${fmtK(t.prompt_chars)} chars of context` +
+    (t.comments ? ` · ${t.comments} human comments` : "") +
+    ` · replied ${fmtK(t.response_chars)} chars`;
+  $("thRaw").textContent = t.response_head || "—";
+  $("thPrompt").textContent = t.prompt_head || "—";
+  const txt = thoughtText(t);
+  if (animate) typewrite($("thText"), txt);
+  else { clearInterval(twTimer); $("thText").innerHTML = esc(txt) + `<span class="caret"></span>`; }
+}
+function renderThinking(thoughts) {
+  if (!thoughts || !thoughts.length) return;
+  const newest = thoughts[thoughts.length - 1];
+  const key = newest.ts + "/" + newest.kind;
+  if (key !== lastThoughtKey) { pinnedThought = null; }
+  const show = pinnedThought || newest;
+  displayThought(show, key !== lastThoughtKey && !pinnedThought);
+  lastThoughtKey = key;
+  const hist = thoughts.slice(0, -1).reverse().slice(0, 12);
+  $("thHist").innerHTML = hist.map((t, i) => {
+    const { rat } = parseRationale(t);
+    return `<div class="th-row" data-i="${thoughts.length - 2 - i}">
+      <span class="tag ${t.kind}" style="font-size:9px">${esc(t.kind)}</span>
+      <span class="r">${esc(rat)}</span><span>${ago(t.ts)}</span></div>`;
+  }).join("");
+  [...$("thHist").children].forEach(row => row.onclick = () => {
+    pinnedThought = thoughts[+row.dataset.i];
+    displayThought(pinnedThought, false);
+  });
+}
+
+/* ---------------- vitals ---------------- */
+function splitRecall(state, ids) {
+  if (!state || !state.per_case || !ids || !ids.length) return null;
+  const set = new Set(ids);
+  const rows = state.per_case.filter(r => set.has(r.id) && !r.error);
+  if (!rows.length) return null;
+  return rows.filter(r => r.passed).length / rows.length;
+}
+function renderVitals(s) {
+  const state = s.state, cfg = s.config || {};
+  if (!state) return;
+  const r = state.recall;
+  if (r != null) {
+    $("ring").style.strokeDashoffset = (226.2 * (1 - r)).toFixed(1);
+    $("ringTxt").textContent = Math.round(r * 100) + "%";
+  }
+  $("kPassed").textContent = `${state.passed ?? "—"} / ${state.scoreable ?? "—"} bugs caught`;
+  const base = s.ledger && s.ledger.length ? s.ledger[0].champ_recall : null;
+  $("kBase").textContent = base != null ? `session baseline ${base}` : "";
+  const sil = s.silver;
+  if (sil && sil.active) {
+    const silSet = new Set(sil.ids || []);
+    const golden = (state.per_case || []).filter(r => !silSet.has(r.id)).length;
+    $("kEvalSet").textContent = `eval set: ${golden} golden + ${sil.active} silver · self-growing`;
+  } else $("kEvalSet").textContent = "";
+  const tr = splitRecall(state, state.train_ids), vr = splitRecall(state, state.val_ids);
+  $("kVal").textContent = vr == null ? "—" : vr.toFixed(3);
+  $("kValBar").style.width = pct(vr);
+  $("kTrain").textContent = tr == null ? "—" : tr.toFixed(3);
+  $("kTrainBar").style.width = pct(tr);
+  const fp = state.champ_fp;
+  $("kFP").textContent = fp == null ? "n/a" : pct(fp, 1);
+  $("kFP").className = "v " + (fp == null ? "" : fp <= 0.05 ? "good" : fp <= 0.15 ? "warn" : "bad");
+  $("kFPSub").textContent = `gate: candidate ≤ champion${cfg.precision_tol ? " + " + cfg.precision_tol : ""}`;
+  $("kNoise").textContent = state.noise ?? "—";
+  $("kNoiseSub").textContent = `tolerance +${Math.round((cfg.noise_tolerance || 0) * 100)}% on passing cases`;
+  const size = (s.champion && s.champion.total) || state.champ_size, budget = cfg.max_skill_chars;
+  $("kSize").textContent = fmtK(size);
+  if (size != null && budget) {
+    const frac = size / budget;
+    $("kSizeBar").style.width = Math.min(100, Math.round(frac * 100)) + "%";
+    $("kSizeSub").textContent = `${Math.round(frac * 100)}% of ${fmtK(budget)} budget`;
+    $("kSizeSub").className = "sub " + (frac > 0.85 ? "warn" : "");
+  }
+  const off = state.corpus_offset, tot = s.corpus_total;
+  $("kCorpus").innerHTML = off == null ? "—" : `${off.toLocaleString()}<small>${tot ? " / " + tot.toLocaleString() : ""}</small>`;
+  if (off != null && tot) $("kCorpusBar").style.width = Math.min(100, Math.round(100 * off / tot)) + "%";
+  const sh = state.shadow;
+  if (sh && sh.shadow_recall != null) {
+    $("kShadow").innerHTML = `${sh.shadow_recall.toFixed(3)}<small> · ${sh.caught}/${sh.checked} matched</small>`;
+    $("kShadowSub").textContent =
+      `window of ${sh.checked} resolved human catches (pool ${sh.total_pool ? sh.total_pool.toLocaleString() : "?"}) · ${ago(sh.ts)}`;
+  }
+  const t = state.totals;
+  if (t) $("kTotals").innerHTML =
+    `iterations <b style="color:var(--txt);font-weight:500">${t.iters}</b> · promoted <b style="color:var(--grn);font-weight:500">${t.promotions}</b> ` +
+    `(${t.corpus_adds} corpus · ${t.consolidations} consolidate) · rejected <b style="color:var(--red)">${t.rejects}</b> ` +
+    `· errors ${t.errors} · ~${t.model_calls} gemini calls`;
+  if (s.attempts && s.attempts.stats) {
+    const a = s.attempts.stats;
+    $("kTotals").innerHTML += `<br>attempt memory: ${a.unique} unique patches tried` +
+      (a.duplicates_skipped ? ` · <b style="color:var(--amb)">${a.duplicates_skipped}</b> duplicates skipped pre-eval` : "");
+  }
+}
+
+/* ---------------- chart ---------------- */
+function renderChart(ledger) {
+  const svg = $("chart"), box = svg.parentElement;
+  const data = (ledger || []).filter(r => r.cand_recall != null || r.train_recall != null);
+  if (!data.length) { svg.innerHTML = `<text x="12" y="30" fill="#98a2b8" font-size="12" font-family="inherit">no decided iterations yet</text>`; return; }
+  const W = Math.max(box.clientWidth - 4, 420), H = 230, L = 34, R = 10, T = 12, B = 22;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("width", W); svg.setAttribute("height", H);
+  const n = data.length;
+  const x = i => n === 1 ? (L + (W - L - R) / 2) : L + (W - L - R) * i / (n - 1);
+  const y = v => T + (H - T - B) * (1 - v);
+  let g = "";
+  [0, .25, .5, .75, 1].forEach(v => {
+    g += `<line x1="${L}" y1="${y(v)}" x2="${W - R}" y2="${y(v)}" stroke="rgba(16,24,40,.06)"/>` +
+         `<text x="${L - 6}" y="${y(v) + 3}" text-anchor="end" fill="#98a2b8" font-size="9" font-family="inherit">${v}</text>`;
+  });
+  const path = (key, color, dash, w) => {
+    const pts = data.map((r, i) => r[key] == null ? null : `${x(i)},${y(r[key])}`).filter(Boolean);
+    if (!pts.length) return "";
+    return `<polyline points="${pts.join(" ")}" fill="none" stroke="${color}" stroke-width="${w || 1.5}" ${dash ? 'stroke-dasharray="3 5"' : ""} stroke-linecap="round" stroke-linejoin="round" opacity="${dash ? .55 : .95}"/>`;
+  };
+  const valPts = data.map((r, i) => r.val_recall == null ? null : [x(i), y(r.val_recall)]).filter(Boolean);
+  if (valPts.length > 1) {
+    const area = valPts.map(p => `${p[0]},${p[1]}`).join(" ") +
+      ` ${valPts[valPts.length - 1][0]},${y(0)} ${valPts[0][0]},${y(0)}`;
+    g += `<polygon points="${area}" fill="rgba(15,165,115,.08)"/>`;
+  }
+  g += path("cand_recall", "rgba(93,107,133,.45)", true, 1);
+  g += path("train_recall", "var(--cyan)", false, 1.5);
+  g += path("val_recall", "var(--grn)", false, 2);
+  data.forEach((r, i) => {
+    if (r.status === "accepted") {
+      const yy = y(r.val_recall ?? r.cand_recall ?? 0);
+      g += `<rect x="${x(i) - 3.5}" y="${yy - 3.5}" width="7" height="7" fill="var(--grn)" transform="rotate(45 ${x(i)} ${yy})"/>`;
+    }
+    if (i % Math.ceil(n / 14) === 0)
+      g += `<text x="${x(i)}" y="${H - 6}" text-anchor="middle" fill="#98a2b8" font-size="9" font-family="inherit">#${r.iter}</text>`;
+  });
+  g += `<rect id="chartHit" x="0" y="0" width="${W}" height="${H}" fill="transparent"/>`;
+  svg.innerHTML = g;
+  const tip = $("chartTip");
+  $("chartHit").onmousemove = e => {
+    const rect = svg.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    let bi = 0, bd = 1e9;
+    data.forEach((r, i) => { const d = Math.abs(x(i) - mx); if (d < bd) { bd = d; bi = i; } });
+    const r = data[bi];
+    tip.style.display = "block";
+    tip.innerHTML = `<b>#${r.iter}</b> ${esc(r.kind)} · <span style="color:${r.status === "accepted" ? "var(--grn)" : "var(--red)"}">${esc(r.status)}</span><br>` +
+      `train ${r.train_recall ?? "—"} · val ${r.val_recall ?? "—"} · overall ${r.cand_recall ?? "—"}<br>` +
+      `size ${fmtK(r.size)}${r.fp_rate != null ? " · FP " + pct(r.fp_rate, 1) : ""}`;
+    const bx = Math.min(Math.max(x(bi) - 70, 0), box.clientWidth - 170);
+    tip.style.left = bx + "px"; tip.style.top = "8px";
+  };
+  $("chartHit").onmouseleave = () => tip.style.display = "none";
+}
+
+/* ---------------- gates ---------------- */
+function renderGates(ledger) {
+  const rec = [...(ledger || [])].reverse().find(r => r.status === "accepted" || r.status === "rejected");
+  if (!rec) return;
+  $("gatesIter").innerHTML = `iter #${rec.iter} · <span style="color:${rec.status === "accepted" ? "var(--grn)" : "var(--red)"}">${rec.status}</span>`;
+  const reason = rec.reason || "";
+  const pre = /screened out|no new human pattern|nothing to target|> budget/.test(reason) && rec.cand_recall == null;
+  const kindGate = { corpus: ["recall not below champion", /recall dropped/],
+    consolidate: ["rubric shrank, recall held", /no shrink|recall dropped/],
+    propose: ["new train bug caught · val held", /no new train bug|val recall regressed|screened out/] }[rec.kind] ||
+    ["kind-specific gain", /$^/];
+  const gates = [
+    ["no per-case regression", /regressed/],
+    ["size within budget", /> budget/],
+    ["noise held on passing cases", /noise grew|noisier/],
+    ["precision: FPs not worse", /precision worse/],
+    kindGate,
+  ];
+  $("gates").innerHTML = gates.map(([name, rx]) => {
+    const failed = rx.test(reason);
+    let cls = failed ? "fail" : "ok", ic = failed ? "✕" : "✓", why = failed ? reason : "";
+    if (!failed && name.startsWith("precision") && rec.fp_rate == null) { cls = "na"; ic = "○"; why = "not sampled this iter"; }
+    if (!failed && pre && !rx.test(reason)) { cls = "na"; ic = "○"; why = "not reached"; }
+    if (failed && pre) { why = reason; }
+    return `<div class="gate ${cls}"><span class="ic">${ic}</span>${esc(name)}<span class="why">${esc(why.slice(0, 70))}</span></div>`;
+  }).join("");
+}
+
+/* ---------------- matrix ---------------- */
+function renderMatrix(s) {
+  const cols = (s.ledger || []).filter(r => r.cases).slice(-26);
+  const champ = s.state && s.state.per_case ? s.state.per_case : null;
+  if (!cols.length && !champ) return;
+  let ids = champ ? champ.map(r => r.id) : Object.keys(cols[cols.length - 1].cases);
+  ids = [...ids].sort();
+  const val = new Set((s.state && s.state.val_ids) || []);
+  const sil = new Set((s.silver && s.silver.ids) || []);
+  let html = `<table class="mx"><tr><th></th>` +
+    cols.map(c => `<td class="colhead ${c.status === "accepted" ? "acc" : ""}" title="iter ${c.iter} · ${esc(c.kind)} · ${esc(c.status)}">${c.status === "accepted" ? "◆" : ""}#${c.iter}</td>`).join("") +
+    `<td class="colhead" style="color:var(--cyan)">now</td></tr>`;
+  ids.forEach(id => {
+    html += `<tr><th class="${val.has(id) ? "val" : ""} ${sil.has(id) ? "sil" : ""}" title="${sil.has(id) ? "silver (self-grown from a resolved human comment)" : ""}${val.has(id) ? " · held-out validation case" : " · train case"}">${esc(id)}${val.has(id) ? "·v" : ""}${sil.has(id) ? "·s" : ""}</th>`;
+    let prev = null;
+    cols.forEach(c => {
+      const v = c.cases[id];
+      const flip = prev !== null && v !== undefined && v !== prev;
+      html += `<td><span class="cell ${v === undefined ? "n" : v ? "p" : "f"} ${flip ? "flip" : ""}" title="#${c.iter} ${esc(id)}: ${v === undefined ? "n/a" : v ? "pass" : "miss"}"></span></td>`;
+      if (v !== undefined) prev = v;
+    });
+    const cv = champ ? (champ.find(r => r.id === id) || {}).passed : undefined;
+    html += `<td><span class="cell ${cv === undefined ? "n" : cv ? "p" : "f"}" style="box-shadow:inset 0 0 0 1px rgba(18,144,224,.5)" title="champion now: ${cv ? "pass" : "miss"}"></span></td></tr>`;
+  });
+  $("matrix").innerHTML = html + "</table>";
+}
+
+/* ---------------- feed / rubric / history / misses ---------------- */
+function renderFeed(ledger) {
+  const items = [...(ledger || [])].reverse();
+  $("feedCount").textContent = items.length ? items.length + " recorded" : "";
+  if (!items.length) { $("feed").innerHTML = `<span style="color:var(--mut2);font-size:11.5px">no iterations yet</span>`; return; }
+  $("feed").innerHTML = items.map(r => {
+    const cls = r.status === "accepted" ? "acc" : r.status === "error" ? "err"
+      : r.status === "info" ? "inf" : "rej";
+    const main = r.status === "accepted" ? (r.rationale || r.reason) : (r.reason || r.rationale);
+    const dl = [];
+    if (r.val_recall != null) dl.push(`val ${r.val_recall}`);
+    if (r.train_recall != null) dl.push(`train ${r.train_recall}`);
+    if (r.size != null) dl.push(`size ${fmtK(r.size)}`);
+    if (r.fp_rate != null) dl.push(`FP ${pct(r.fp_rate, 1)}`);
+    if (r.model_calls) dl.push(`${r.model_calls} calls`);
+    if (r.beam) dl.push(`beam ${r.beam.width}${r.beam.duplicates_skipped ? " · " + r.beam.duplicates_skipped + " dup skipped" : ""}`);
+    if (r.eval_set) dl.push(`set ${r.eval_set.golden}g + ${r.eval_set.silver}s`);
+    return `<div class="fitem ${cls}" title="${esc((r.changelog || []).join("\n"))}">
+      <div class="l1"><span class="it">#${r.iter}</span>
+        <span class="tag ${esc(r.kind)}" style="font-size:9px">${esc(r.kind)}</span>
+        <span class="st">${esc(r.status)}</span><span class="ago">${ago(r.ts)}</span></div>
+      <div class="rs">${esc(String(main || "").slice(0, 180))}</div>
+      ${dl.length ? `<div class="dl">${dl.map(esc).join(" · ")}</div>` : ""}</div>`;
+  }).join("");
+}
+function renderRubric(s) {
+  const c = s.champion;
+  if (!c || !c.files) { $("rubricFiles").innerHTML = `<span style="color:var(--mut2);font-size:11.5px">champion not seeded yet</span>`; return; }
+  const budget = (s.config || {}).max_skill_chars;
+  $("rubricTotal").textContent = `${fmtK(c.total)}${budget ? " / " + fmtK(budget) + " budget" : ""}`;
+  const mx = Math.max(...c.files.map(f => f.chars), 1);
+  $("rubricFiles").innerHTML = c.files.map(f =>
+    `<div class="rfile"><span class="nm" title="${esc(f.file)}">${esc(f.file)}</span>
+     <span class="rb"><i style="width:${Math.round(100 * f.chars / mx)}%"></i></span>
+     <span class="ch">${fmtK(f.chars)}</span></div>`).join("");
+}
+function renderHistory(hist) {
+  if (!hist || !hist.length) return;
+  $("histList").innerHTML = [...hist].reverse().map(h =>
+    `<div class="hrow"><span style="color:var(--grn)">◆</span><span>${esc(h)}</span>
+     <button data-h="${esc(h)}">copy rollback</button></div>`).join("");
+  [...$("histList").querySelectorAll("button")].forEach(b => b.onclick = () => {
+    navigator.clipboard.writeText(`python3 loop.py --rollback ${b.dataset.h}`).catch(() => {});
+    b.textContent = "copied ✓"; setTimeout(() => b.textContent = "copy rollback", 1300);
+  });
+}
+function renderMisses(state) {
+  if (!state) return;
+  const val = new Set(state.val_ids || []);
+  const m = state.missed || [];
+  const errs = (state.per_case || []).filter(r => r.error);
+  let html = m.map(x =>
+    `<div class="miss"><span class="id">${esc(x.id)}</span>${val.has(x.id) ? `<span class="vt">val</span>` : ""}
+     <span style="color:var(--mut2)">PR #${esc(x.pr)}</span><span class="bg" title="${esc(x.bug)}">${esc(x.bug)}</span></div>`).join("");
+  html += errs.map(r =>
+    `<div class="miss"><span class="id" style="color:var(--amb)">${esc(r.id)}</span>
+     <span style="color:var(--amb);font-size:10px">errored</span>
+     <span class="bg" title="${esc(r.error)}">${esc(r.error)}</span></div>`).join("");
+  if (!html) html = (state.scoreable > 0)
+    ? `<div style="color:var(--grn);font-size:12px;padding:6px 2px">none — full recall on the golden set ◆</div>`
+    : `<div style="color:var(--mut2);font-size:12px;padding:6px 2px">nothing scored yet</div>`;
+  $("misses").innerHTML = html;
+}
+
+/* ---------------- alerts + top ---------------- */
+function renderTop(s, fresh) {
+  const st = s.status, cfg = s.config || {};
+  $("demoBadge").style.display = s.demo ? "" : "none";
+  const lastIter = st && st.iter != null ? st.iter :
+    (s.ledger && s.ledger.length ? s.ledger[s.ledger.length - 1].iter : null);
+  $("iterChip").innerHTML = `iter <b>${lastIter ?? "—"}</b>`;
+  $("uptimeChip").innerHTML = `uptime <b>${st && fresh ? dur(serverNow() - st.loop_started) : "—"}</b>`;
+  $("modelChip").innerHTML = `<b>${esc(cfg.model || (st && st.model) || "—")}</b>`;
+  const orb = $("orb");
+  orb.className = "orb" + (!st ? " off" : !fresh ? " off" :
+    st.phase === "stopped" ? " warn" : st.phase === "error" ? " warn" : "");
+  const alerts = [];
+  if (st && !fresh) alerts.push(["loop offline · " + ago(st.ts), ""]);
+  if (st && fresh && st.phase === "stopped") alerts.push(["bounded run finished", "amb"]);
+  const dec = [...(s.ledger || [])].filter(r => r.val_recall != null);
+  if (dec.length >= 2 && dec[dec.length - 1].val_recall < dec[dec.length - 2].val_recall)
+    alerts.push(["val ↓ last decided iter", "amb"]);
+  if (s.state && s.state.champ_fp != null && s.state.champ_fp >= 0.15) alerts.push(["FP elevated", "amb"]);
+  const nerr = s.state ? (s.state.per_case || []).filter(r => r.error).length : 0;
+  if (nerr) alerts.push([`${nerr} case(s) errored — eval ${s.state.scoreable === 0 ? "DEAD" : "degraded"}`, s.state.scoreable === 0 ? "" : "amb"]);
+  if (s.state && cfg.plateau_iters && (s.state.consec_rejects || 0) >= cfg.plateau_iters)
+    alerts.push([`plateau · ${s.state.consec_rejects} rejects — beam widened + reflection on`, "amb"]);
+  if (cfg.max_calls_per_day && s.state && s.state.calls_day &&
+      s.state.calls_day.calls >= cfg.max_calls_per_day) alerts.push(["daily call budget spent", "amb"]);
+  const size = (s.champion && s.champion.total), budget = cfg.max_skill_chars;
+  if (size && budget && size / budget > 0.85) alerts.push(["rubric near budget", "amb"]);
+  $("alerts").innerHTML = alerts.map(([t, c]) => `<span class="alert ${c}">${esc(t)}</span>`).join("");
+  $("fWs").textContent = s.workspace || "—";
+  $("fRoot").textContent = cfg.maestro_root || "—";
+  $("fModel").textContent = cfg.model || "—";
+  $("fProj").textContent = cfg.project || "—";
+  $("fMode").textContent = s.demo ? "demo (synthetic)" : "live workspace";
+}
+
+/* ---------------- master render ---------------- */
+function render(s) {
+  snap = s; recvWall = Date.now();
+  const st = s.status;
+  const fresh = !!st && (s.now - st.ts) < 240;
+  const empty = !st && !s.state && !(s.ledger && s.ledger.length);
+  $("hero").style.display = empty ? "" : "none";
+  $("pipeWrap").style.display = empty ? "none" : "";
+  renderTop(s, fresh);
+  renderPipeline(st, fresh);
+  renderThinking(s.thoughts);
+  renderVitals(s);
+  renderChart(s.ledger);
+  renderGates(s.ledger);
+  renderMatrix(s);
+  renderFeed(s.ledger);
+  renderRubric(s);
+  renderHistory(s.history);
+  renderMisses(s.state);
+}
+
+buildPipeline();
+connect();
+setInterval(() => {
+  if (!snap) return;
+  const st = snap.status, fresh = !!st && (serverNow() - st.ts) < 240;
+  if (st) renderPipeline(st, fresh);
+  $("uptimeChip").innerHTML = `uptime <b>${st && fresh ? dur(serverNow() - st.loop_started) : "—"}</b>`;
+  if (snap.thoughts && snap.thoughts.length)
+    $("thAgo").textContent = ago((pinnedThought || snap.thoughts[snap.thoughts.length - 1]).ts);
+}, 1000);
+let rsz = null;
+window.addEventListener("resize", () => { clearTimeout(rsz); rsz = setTimeout(() => snap && renderChart(snap.ledger), 200); });
+</script>
+</body>
+</html>

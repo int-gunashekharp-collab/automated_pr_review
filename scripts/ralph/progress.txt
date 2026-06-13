@@ -1,0 +1,31 @@
+# Ralph progress log — append-only learnings for future iterations.
+# Each fresh instance reads this BEFORE picking a story. Keep entries short:
+# patterns discovered, gotchas, where things live, what NOT to repeat.
+
+seeded 2026-06-12 — no iterations run yet.
+known gotchas for whoever goes first:
+- run everything with LOOP_ALLOW_STUB=1 for offline tests; never hit Vertex in smoke.
+- config paths are computed at import; smoke_test.py overrides them — new config
+  paths MUST be added to smoke's override block or tests write to the real workspace.
+- ledger/status records: additive keys only; dashboard parses defensively but
+  the reporter counts statuses (use status "info" for non-decision records).
+- corpus/outcomes JSONL files contain malformed lines in the wild — always
+  try/except json.loads per line.
+- the other dev session edits loop.py frequently — make surgical edits, re-read
+  before writing, never reformat whole files.
+
+2026-06-12 — ralph is now IN-HOUSE (scripts/ralph/ralph.py), no gemini-cli.
+how it works now (read before assuming the old shell flow):
+- you (the model) DON'T have shell/file tools. You get a curated context and you
+  return ONE strict JSON file-patch: {rationale, done, files:[{path,action,
+  content}], progress_note}. The runner applies + gates + commits it.
+- the gate is py_compile(touched .py) + LOOP_ALLOW_STUB=1 smoke_test.py. Your
+  patch MUST add offline smoke checks for the new behaviour or the gate fails.
+- path safety is enforced in code (_safe_target): writes that escape the loop
+  folder / hit .git / land under maestro-core are REJECTED. Don't try.
+- RED gate ⇒ your edits are rolled back (per-file snapshot) and this line is
+  logged RED; the next iteration must turn it green first.
+- the brain is proposer.call_vertex (same Vertex Gemini as the loop's proposer).
+- known limitation: single-shot patch, no read-back round. If a story needs to
+  see a file you weren't given, mention it in progress_note + ship a partial
+  slice (done:false) rather than guessing.

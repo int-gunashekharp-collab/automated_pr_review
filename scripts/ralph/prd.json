@@ -1,0 +1,97 @@
+{
+  "project": "self-improving PR-reviewer loop — roadmap v3",
+  "branchName": "ralph/loop-v3",
+  "description": "Game-changer additions on top of the v2 loop. Every story is additive, env-gated, offline-smoke-tested, and never writes outside the loop folder. maestro-core is read-only, always.",
+  "userStories": [
+    {
+      "id": "S1",
+      "priority": 1,
+      "passes": false,
+      "title": "Outcome mining: harvest production shadow-review outcomes",
+      "asA": "loop operator",
+      "iWant": "an outcomes.py that mines what happened to the PRODUCTION AI reviewer's comments on recent merged PRs (acted-on vs dismissed)",
+      "soThat": "the loop can learn from live outcomes, not only the historical corpus",
+      "acceptanceCriteria": [
+        "new outcomes.py: fetch AI-reviewer comments + their resolution/reactions for the last LOOP_OUTCOMES_PRS merged PRs via gh (subprocess), identifying the AI bot author by LOOP_AI_REVIEWER_LOGIN (env, with sane default)",
+        "classify each finding: acted_on (resolved / author fix commit references it) | dismissed (unresolved + rebuttal reply) | unknown",
+        "append-only workspace/outcomes.jsonl with src fingerprints (no duplicates on re-runs); defensive JSON parsing",
+        "CLI: python3 loop.py --mine-outcomes runs one pass and prints a summary",
+        "smoke: stubbed gh subprocess (LOOP_ALLOW_STUB path or injected fn) proves classification + dedupe offline; smoke stays green"
+      ]
+    },
+    {
+      "id": "S2",
+      "priority": 2,
+      "passes": false,
+      "title": "Outcome feedback: dismissed findings become do-not-flag targets, acted-on misses become propose targets",
+      "asA": "loop operator",
+      "iWant": "outcomes.jsonl wired into the proposer inputs behind LOOP_OUTCOMES=1",
+      "soThat": "the rubric learns from real authors accepting or rebutting the AI's findings",
+      "acceptanceCriteria": [
+        "dismissed clusters are offered to propose_edit as false_positives-style input (subtraction pressure), acted_on-but-human-unmatched patterns offered to the corpus-style proposer path",
+        "all existing gates unchanged; feature fully off when LOOP_OUTCOMES=0 (default)",
+        "ledger records when outcome-derived inputs were used (additive keys only)",
+        "smoke: with stub outcomes, prove the proposer prompt receives the outcome sections; smoke stays green"
+      ]
+    },
+    {
+      "id": "S3",
+      "priority": 3,
+      "passes": false,
+      "title": "Caught-beyond-humans counter",
+      "asA": "team lead",
+      "iWant": "a verified count of AI findings that no human raised and the author still fixed",
+      "soThat": "we can prove the reviewer catches what humans missed",
+      "acceptanceCriteria": [
+        "computed from outcomes.jsonl: acted_on findings with no overlapping human comment on the same PR+path window",
+        "persisted in state.json (additive key beyond_humans) and exposed in /api/snapshot",
+        "dashboard: counter in champion vitals + demo simulator fakes a plausible value",
+        "smoke: stubbed outcomes produce the expected count; smoke stays green"
+      ]
+    },
+    {
+      "id": "S4",
+      "priority": 4,
+      "passes": false,
+      "title": "Counterfactual replay: champion vs live skill on recent merged PRs",
+      "asA": "team lead deciding on adoption",
+      "iWant": "replay.py + python3 loop.py --replay N that reviews the last N merged PR diffs with BOTH the live skill and the champion",
+      "soThat": "adoption evidence reads 'champion would have caught X bugs the live rubric missed, at +Y noise, on OUR real traffic'",
+      "acceptanceCriteria": [
+        "reuses harness_bridge.evaluate-style review calls with per-case checkpointing semantics (a replay can resume)",
+        "writes reports/replay/REPLAY.md: per-PR findings diff (champion-only / live-only / both) + totals; no gating, report only",
+        "respects MAX_CALLS_PER_DAY accounting when run via the CLI",
+        "smoke: stubbed diffs + reviewer prove the comparison + report rendering offline; smoke stays green"
+      ]
+    },
+    {
+      "id": "S5",
+      "priority": 5,
+      "passes": false,
+      "title": "Severity-weighted recall (reported, not gating)",
+      "asA": "loop operator",
+      "iWant": "a severity-weighted score (critical=4, high=3, medium=2, low=1 via LOOP_SEV_WEIGHTS) computed alongside recall",
+      "soThat": "a critical catch is visibly worth more than a nit",
+      "acceptanceCriteria": [
+        "pure function in metrics.py + unit checks in smoke",
+        "reported in hourly digests and persisted in state.json (additive); shown in dashboard vitals; decide() UNCHANGED",
+        "smoke stays green"
+      ]
+    },
+    {
+      "id": "S6",
+      "priority": 6,
+      "passes": false,
+      "title": "Rubric routing by changed-file paths (behind LOOP_ROUTING=1)",
+      "asA": "loop operator",
+      "iWant": "reviews to load only the reference files whose path globs match the diff (routing map in the skill copy, never in maestro-core)",
+      "soThat": "the rubric can grow past the size budget without raising prompt noise",
+      "acceptanceCriteria": [
+        "routing map workspace/champion-skill/routing.json (created/maintained on the COPY only); unmatched files always included as core",
+        "LOOP_ROUTING=0 (default) is byte-identical to current behaviour — proven by a smoke equivalence check",
+        "with routing on, skill_size budget applies to the ROUTED prompt size per review",
+        "smoke stays green"
+      ]
+    }
+  ]
+}

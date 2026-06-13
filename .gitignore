@@ -1,0 +1,6 @@
+# The loop writes everything runtime-generated under here — never commit it.
+workspace/
+reports/
+*.pyc
+__pycache__/
+.env
