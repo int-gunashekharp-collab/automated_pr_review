@@ -336,6 +336,37 @@ GLOBAL endpoint. (Note: `gemini-3-pro-preview` was discontinued 2026-03-26.)
      patch-based, not a multi-turn file-editing agent — it sees a curated context
      (config.py + smoke_test.py + story-named files + repo map, capped) and
      returns one patch. A read-back/tool-call round could be added later.
+13. **"integrate completely so I can view what all changed" (2026-06-13).** Wired
+   the in-house builder into the live dashboard end to end, so a ralph run is
+   watchable like a loop run. Three files:
+   - `ralph.py` now publishes two gitignored streams under `workspace/`:
+     `ralph_state.json` (roadmap snapshot — each story's status: done/building/
+     red/pending, done/total, current, iteration) and `ralph.jsonl` (append-only
+     per-iteration build events, each carrying the changelog + a `difflib`
+     unified diff per file with +/- counts, the GREEN/RED/rejected result, note,
+     and commit hash). `_change_records()` computes diffs from the per-file
+     snapshot BEFORE any rollback, so a rolled-back RED attempt is still
+     inspectable. `git_commit` now returns the short hash. Publishing is
+     crash-proof (swallows all exceptions, like telemetry).
+   - `dashboard_server.py`: `build_snapshot` gains a `ralph` block (state +
+     last 30 events); both files added to `_watch_signature` so SSE pushes
+     builder updates live; `run_demo_writer` seeds a realistic roadmap (S1 done
+     with a real diff event, S2 building) and advances a story every ~4 demo
+     iters, so `--demo` previews the builder with no Vertex.
+   - `dashboard.html`: a new "Builder · ralph roadmap" panel (aurora-seam,
+     Porcelain Ledger style) above the loop grid — story chips coloured by
+     status (emerald done / azure-pulsing building / terracotta red / muted
+     pending), a done/total progress bar, and a "what ralph changed" feed of
+     build events with expandable per-file unified diffs (green/red line
+     tinting). The phase strip now recognises `ralph-*` phases (shows a builder
+     message instead of the loop pipeline). Hidden entirely when no ralph data.
+   - Verified offline: ralph `--selftest` now 17/17 (asserts state + events +
+     diff are published; selftest redirects `config.WORKSPACE` to a sandbox so
+     it never pollutes the real workspace); `node --check` on the dashboard JS;
+     `--demo` snapshot serves the ralph block (6 stories, 1 event, 2 diffs) and
+     the page serves the builder DOM; loop smoke still 37/37.
+   - To watch a real run: `python3 dashboard_server.py` (terminal 1) +
+     `RALPH_SKIP_MAESTRO_GUARD=1 python3 scripts/ralph/ralph.py 5` (terminal 2).
 
 ---
 

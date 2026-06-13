@@ -37,6 +37,7 @@ neither — it stubs the brain and proves the harness end to end.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import shutil
@@ -82,6 +83,12 @@ DO_COMMIT = _b("RALPH_GIT_COMMIT", True)
 # Files always worth showing the model: the knob/path source of truth and the
 # offline test it must keep green.
 _ALWAYS_INCLUDE = ("config.py", "smoke_test.py")
+
+# Dashboard data streams the builder publishes (read by dashboard_server.py).
+# Both live under the loop's gitignored workspace/ — isolation holds.
+RALPH_EVENTS = "ralph.jsonl"      # append-only per-iteration build events (+ diffs)
+RALPH_STATE = "ralph_state.json"  # roadmap snapshot: which stories done/building/red
+_CURRENT_MAX_ITERS = [MAX_ITERS_DEFAULT]   # set by main(); read by _publish_state
 
 
 # --- path safety: the cardinal rule, enforced in code -----------------------
@@ -237,9 +244,10 @@ def smoke_marker(result: str, i: int) -> None:
                      "NEXT ITERATION MUST FIX THIS FIRST, before any new story")
 
 
-def git_commit(msg: str) -> None:
+def git_commit(msg: str) -> str | None:
+    """Best-effort commit. Returns the short hash on success, else None."""
     if not DO_COMMIT or not (ROOT / ".git").exists():
-        return
+        return None
     try:
         subprocess.run(["git", "-C", str(ROOT), "add", "-A"],
                        capture_output=True, text=True, check=True)
@@ -247,8 +255,86 @@ def git_commit(msg: str) -> None:
                            capture_output=True, text=True)
         if r.returncode != 0 and "nothing to commit" not in (r.stdout + r.stderr):
             print(f"  (git commit skipped: {r.stderr.strip()[-160:] or r.stdout.strip()[-160:]})")
+            return None
+        h = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
+                           capture_output=True, text=True)
+        return h.stdout.strip() or None
     except Exception as e:  # noqa: BLE001 — commits are best-effort, never fatal
         print(f"  (git commit skipped: {e})")
+        return None
+
+
+# --- dashboard publishing (crash-proof, like telemetry) ---------------------
+def _change_records(applied_meta: list[dict], snapshot: dict) -> list[dict]:
+    """For each file the iteration touched, build a viewable change record:
+    action, +/- line counts, and a (capped) unified diff of before->after. Call
+    this BEFORE any rollback so a RED attempt's diff is still inspectable."""
+    by_path: dict[str, str] = {}
+    for m in applied_meta:                      # last action per path wins
+        if m.get("path"):
+            by_path[m["path"]] = m.get("action", "create")
+    recs = []
+    for rel, action in by_path.items():
+        try:
+            target = _safe_target(rel)
+        except ValueError:
+            continue
+        before_b = snapshot.get(str(target))
+        before = before_b.decode("utf-8", "replace") if before_b else ""
+        after = target.read_text(errors="replace") if target.exists() else ""
+        diff_lines = list(difflib.unified_diff(
+            before.splitlines(), after.splitlines(),
+            fromfile=f"a/{rel}", tofile=f"b/{rel}", lineterm=""))
+        added = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
+        removed = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
+        diff_text = "\n".join(diff_lines)
+        if len(diff_text) > 6000:
+            diff_text = diff_text[:6000] + "\n… (diff truncated) …"
+        recs.append({"path": rel, "action": action, "added": added,
+                     "removed": removed, "diff": diff_text})
+    return recs
+
+
+def _publish_event(rec: dict) -> None:
+    try:
+        rec.setdefault("ts", round(time.time(), 3))
+        config.WORKSPACE.mkdir(parents=True, exist_ok=True)
+        f = config.WORKSPACE / RALPH_EVENTS
+        with f.open("a") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        lines = f.read_text().splitlines()
+        if len(lines) > 300:
+            tmp = config.WORKSPACE / ("." + RALPH_EVENTS + ".tmp")
+            tmp.write_text("\n".join(lines[-200:]) + "\n")
+            os.replace(tmp, f)
+    except Exception:
+        pass
+
+
+def _publish_state(prd: dict, *, iteration=None, running=True, phase=None,
+                   current=None, override: dict | None = None) -> None:
+    override = override or {}
+    try:
+        stories, done = [], 0
+        for s in sorted(prd.get("userStories", []), key=lambda s: s.get("priority", 999)):
+            sid = s.get("id")
+            if s.get("passes"):
+                done += 1
+            status = override.get(sid) or ("done" if s.get("passes")
+                     else "building" if current and sid == current else "pending")
+            stories.append({"id": sid, "priority": s.get("priority"),
+                            "title": s.get("title", ""), "status": status})
+        state = {"ts": round(time.time(), 3), "model": config.GEMINI_MODEL,
+                 "project": config.GCP_PROJECT, "running": running,
+                 "iteration": iteration, "max_iters": _CURRENT_MAX_ITERS[0],
+                 "phase": phase, "current": current, "done": done,
+                 "total": len(stories), "stories": stories}
+        config.WORKSPACE.mkdir(parents=True, exist_ok=True)
+        tmp = config.WORKSPACE / ".ralph_state.json.tmp"
+        tmp.write_text(json.dumps(state))
+        os.replace(tmp, config.WORKSPACE / RALPH_STATE)
+    except Exception:
+        pass
 
 
 def ensure_git_baseline() -> None:
@@ -353,22 +439,37 @@ def run_iteration(i: int, call_fn, *, commit: bool = True) -> str:
     if story is None:
         return "done"
     sid = story.get("id", "?")
-    telemetry.phase("ralph-build", iteration=i, story=sid,
-                    title=story.get("title", ""))
+    title = story.get("title", "")
+    telemetry.phase("ralph-build", iteration=i, story=sid, title=title)
+    _publish_state(prd, iteration=i, running=True, phase="ralph-build", current=sid)
     guard_maestro()
 
     raw = call_fn(build_prompt(story))
     telemetry.thought("ralph", "(story " + sid + ")", raw, story=sid)
+    tries = 0
+
+    def emit(result, *, done=False, changes=None, note="", commit_hash=None, detail=""):
+        _publish_event({"iteration": i, "story": sid, "title": title,
+                        "result": result, "done": done, "changes": changes or [],
+                        "note": note, "commit": commit_hash, "refines": tries,
+                        "detail": detail[:400]})
+        override = {sid: "red"} if result in ("red", "rejected") else None
+        _publish_state(load_prd(), iteration=i, running=True,
+                       phase="ralph-idle", current=None, override=override)
+
     try:
         patch = proposer._extract_json(raw)
     except ValueError as e:
         log_progress(f"iter {i} {sid}: brain returned no JSON ({e}) — skipped")
+        emit("rejected", detail=str(e))
         return "red"
     files = patch.get("files") or []
     if not files:
         log_progress(f"iter {i} {sid}: brain proposed no files — skipped")
+        emit("rejected", detail="no files in patch")
         return "red"
 
+    applied_meta: list[dict] = []
     snapshot: dict = {}
     try:
         changelog, snapshot = _apply(files)
@@ -377,12 +478,13 @@ def run_iteration(i: int, call_fn, *, commit: bool = True) -> str:
             _rollback(snapshot)
         log_progress(f"iter {i} {sid}: REJECTED unsafe patch — {e}")
         telemetry.phase("ralph-idle", iteration=i, story=sid, result="rejected")
+        emit("rejected", detail=str(e))
         return "red"
-    touched = [f.get("path", "") for f in files]
+    applied_meta += [{"path": f.get("path", ""), "action": f.get("action", "create")}
+                     for f in files]
     print("  applied:\n    " + "\n    ".join(changelog))
 
-    ok, detail = _gate(touched)
-    tries = 0
+    ok, detail = _gate([m["path"] for m in applied_meta])
     while not ok and tries < REFINE_TRIES:
         tries += 1
         print(f"  gate RED — refine attempt {tries}/{REFINE_TRIES}")
@@ -400,8 +502,11 @@ def run_iteration(i: int, call_fn, *, commit: bool = True) -> str:
             break
         for k, v in snap2.items():          # keep the EARLIEST prior state per file
             snapshot.setdefault(k, v)
-        touched += [f.get("path", "") for f in files2]
-        ok, detail = _gate(touched)
+        applied_meta += [{"path": f.get("path", ""), "action": f.get("action", "create")}
+                         for f in files2]
+        ok, detail = _gate([m["path"] for m in applied_meta])
+
+    changes = _change_records(applied_meta, snapshot)   # capture BEFORE any rollback
 
     if not ok:
         _rollback(snapshot)
@@ -409,6 +514,7 @@ def run_iteration(i: int, call_fn, *, commit: bool = True) -> str:
         log_progress(f"iter {i} {sid}: smoke RED after {tries} refine(s) — "
                      f"rolled back. tail: {detail[:200]!r}")
         telemetry.phase("ralph-idle", iteration=i, story=sid, result="red")
+        emit("red", changes=changes, detail=detail)
         return "red"
 
     done = bool(patch.get("done", True))
@@ -418,10 +524,10 @@ def run_iteration(i: int, call_fn, *, commit: bool = True) -> str:
     note = (patch.get("progress_note") or "").strip()
     log_progress(f"iter {i} {sid}: GREEN — {'story DONE' if done else 'partial slice kept'}"
                  + (f". {note}" if note else ""))
-    if commit:
-        git_commit(f"ralph: {sid} {story.get('title', '')[:60]}".rstrip())
-    telemetry.phase("ralph-idle", iteration=i, story=sid,
-                    result="green", done=done)
+    commit_hash = git_commit(f"ralph: {sid} {title[:60]}".rstrip()) if commit else None
+    telemetry.phase("ralph-idle", iteration=i, story=sid, result="green", done=done)
+    emit("green" if done else "partial", done=done, changes=changes,
+         note=note, commit_hash=commit_hash)
     return "promoted" if done else "partial"
 
 
@@ -439,11 +545,14 @@ def main() -> int:
     if args.selftest:
         return selftest()
 
+    _CURRENT_MAX_ITERS[0] = args.max_iters
     prd = load_prd()
     print(f"ralph(py): {remaining(prd)} story(ies) remaining · max {args.max_iters} iter(s)")
     print(f"ralph(py): brain = Vertex {config.GEMINI_MODEL} · project "
           f"{config.GCP_PROJECT} · in-process (no gemini-cli)")
+    print(f"ralph(py): live dashboard → run  python3 dashboard_server.py")
     ensure_git_baseline()
+    _publish_state(prd, iteration=0, running=True, phase="ralph-build", current=None)
 
     for i in range(1, args.max_iters + 1):
         prd = load_prd()
@@ -465,7 +574,9 @@ def main() -> int:
         if res == "done":
             break
 
-    print(f"\nralph(py): finished — {remaining(load_prd())} story(ies) remaining. "
+    final = load_prd()
+    _publish_state(final, running=False, phase=None, current=None)
+    print(f"\nralph(py): finished — {remaining(final)} story(ies) remaining. "
           f"See {PROGRESS_PATH.name} and git log.")
     return 0
 
@@ -497,13 +608,17 @@ def selftest() -> int:
     chk("accept in-folder path", _safe_target("scripts/ralph/_x.py").name == "_x.py")
 
     # 2) full mechanics on a sandboxed PRD with a stubbed brain
-    saved_prd, saved_prog = PRD_PATH, PROGRESS_PATH
+    saved_prd, saved_prog, saved_ws = PRD_PATH, PROGRESS_PATH, config.WORKSPACE
     tmp = Path(tempfile.mkdtemp(prefix="ralph-selftest-"))
     artifact = "workspace/_ralph_selftest_artifact.py"   # inside ROOT, gitignored scratch
     broken = "workspace/_ralph_selftest_broken.py"
     try:
         PRD_PATH = tmp / "prd.json"
         PROGRESS_PATH = tmp / "progress.txt"
+        # Redirect telemetry + ralph_state/ralph.jsonl into the sandbox so the
+        # selftest never pollutes the real workspace with fake build events.
+        config.WORKSPACE = tmp / "workspace"
+        config.WORKSPACE.mkdir(parents=True, exist_ok=True)
         PROGRESS_PATH.write_text("seeded selftest\n")
         PRD_PATH.write_text(json.dumps({"project": "selftest", "userStories": [
             {"id": "T1", "priority": 1, "passes": False,
@@ -522,6 +637,15 @@ def selftest() -> int:
             json.loads(PRD_PATH.read_text())["userStories"][0]["passes"] is True)
         chk("progress logged GREEN", "GREEN" in PROGRESS_PATH.read_text())
         chk("telemetry heartbeat written", (config.WORKSPACE / "status.json").exists())
+        rstate = json.loads((config.WORKSPACE / RALPH_STATE).read_text())
+        chk("ralph_state.json published the roadmap (dashboard)",
+            any(s.get("id") == "T1" for s in rstate.get("stories", [])))
+        revents = [json.loads(l) for l in
+                   (config.WORKSPACE / RALPH_EVENTS).read_text().splitlines() if l.strip()]
+        green_ev = [e for e in revents if e.get("story") == "T1" and e.get("result") == "green"]
+        chk("ralph.jsonl logged a GREEN build event", bool(green_ev))
+        chk("build event carries a unified diff (view-what-changed)",
+            bool(green_ev) and any(c.get("diff") for c in green_ev[-1].get("changes", [])))
 
         # 3) a RED iteration must roll back and NOT mark the story done
         PRD_PATH.write_text(json.dumps({"project": "selftest", "userStories": [
@@ -542,7 +666,7 @@ def selftest() -> int:
         for rel in (artifact, broken):
             _safe_unlink(ROOT / rel)
         shutil.rmtree(tmp, ignore_errors=True)
-        PRD_PATH, PROGRESS_PATH = saved_prd, saved_prog
+        PRD_PATH, PROGRESS_PATH, config.WORKSPACE = saved_prd, saved_prog, saved_ws
 
     failed = [n for n, c in checks if not c]
     print(f"\nralph selftest {'PASSED' if not failed else 'FAILED'} "

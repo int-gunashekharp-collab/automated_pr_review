@@ -29,3 +29,5 @@ how it works now (read before assuming the old shell flow):
 - known limitation: single-shot patch, no read-back round. If a story needs to
   see a file you weren't given, mention it in progress_note + ship a partial
   slice (done:false) rather than guessing.
+smoke: GREEN after iteration 1
+iter 1 S1: GREEN — partial slice kept. Implemented outcomes.py core logic and offline tests. Kept 'done' false because wiring `--mine-outcomes` into `loop.py` requires editing its `argparse` block in `main()`. Rather than risking a 37KB rewrite of `loop.py` in this single-shot iteration, I deferred the CLI wiring. Next iteration should edit `loop.py` to add `--mine-outcomes` and mark the story done. Smoke is fully green.

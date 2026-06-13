@@ -81,6 +81,54 @@
   .pbar{flex:1;min-width:180px;height:4px;background:#eceff5;border-radius:99px;overflow:hidden}
   .pbar i{display:block;height:100%;background:var(--aurora);width:0%;transition:width .45s;border-radius:99px}
 
+  /* ---------- builder (ralph) ---------- */
+  .bld-wrap{border:1px solid var(--line);border-radius:14px;background:var(--panel);
+            padding:15px 18px;margin-bottom:16px;position:relative;overflow:hidden;
+            box-shadow:0 1px 2px rgba(16,24,40,.04), 0 10px 32px rgba(16,24,40,.05)}
+  .bld-wrap::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;
+                    background:var(--aurora);opacity:.85}
+  .bld-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:4px}
+  .bld-title{font-size:10px;font-weight:600;letter-spacing:.2em;text-transform:uppercase;
+             background:var(--aurora);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .bld-meta{color:var(--mut);font-size:11.5px;font-variant-numeric:tabular-nums}
+  .bld-prog-num{margin-left:auto;color:var(--txt);font-size:11.5px;font-weight:500;
+                font-variant-numeric:tabular-nums}
+  .bld-stories{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:4px}
+  .story{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);
+         border-radius:999px;padding:5px 12px;font-size:11px;color:var(--mut);background:#fff;max-width:100%}
+  .story b{color:var(--txt);font-weight:600}
+  .story .st-dot{font-weight:700}
+  .story.st-done{border-color:rgba(15,165,115,.4);background:rgba(15,165,115,.07);color:#2f6b54}
+  .story.st-done .st-dot{color:var(--grn)}
+  .story.st-building{border-color:rgba(18,144,224,.45);background:rgba(18,144,224,.08);color:#1f5d86;
+                     animation:soft 1.8s ease-in-out infinite}
+  .story.st-building .st-dot{color:var(--cyan)}
+  .story.st-red{border-color:rgba(229,96,79,.4);background:rgba(229,96,79,.07);color:#9e4538}
+  .story.st-red .st-dot{color:var(--red)}
+  .story.st-pending{color:var(--mut2)}
+  .bld-changes{display:flex;flex-direction:column;gap:9px;max-height:380px;overflow:auto;margin-top:4px}
+  .chg{border:1px solid var(--line);border-radius:11px;padding:10px 13px;background:#fbfcfe}
+  .chg-top{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+  .chg-top b{color:var(--txt)}
+  .chg-ttl{color:var(--mut);flex:1;min-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chg-meta{color:var(--mut2);font-size:10.5px;font-variant-numeric:tabular-nums}
+  .rb{padding:2px 9px;border-radius:999px;font-size:9.5px;font-weight:600;letter-spacing:.1em;
+      text-transform:uppercase;border:1px solid}
+  .rb-green{color:var(--grn);border-color:rgba(15,165,115,.4);background:rgba(15,165,115,.06)}
+  .rb-amb{color:var(--amb);border-color:rgba(201,138,10,.4);background:rgba(201,138,10,.06)}
+  .rb-red{color:var(--red);border-color:rgba(229,96,79,.4);background:rgba(229,96,79,.06)}
+  .chg-note{margin-top:6px;color:var(--mut);font-size:11.5px;line-height:1.5}
+  .chg-files{margin-top:8px;display:flex;flex-direction:column;gap:5px}
+  .chg-file{font-family:var(--mono);font-size:11px;color:#4a5872}
+  .chg-files details{margin-top:0;border:1px solid var(--line);border-radius:9px;background:#fff}
+  .chg-files summary{font-family:var(--mono);text-transform:none;letter-spacing:0;font-size:11px;padding:6px 11px}
+  .diff{padding:7px 0;background:#fbfcfe;max-height:260px;overflow:auto;border-top:1px solid var(--line)}
+  .di{display:block;font-family:var(--mono);font-size:11px;line-height:1.55;white-space:pre-wrap;
+      padding:0 12px;color:#4a5872}
+  .di-add{background:rgba(15,165,115,.10);color:#226b4f}
+  .di-del{background:rgba(229,96,79,.10);color:#9e4538}
+  .di-hunk{color:var(--pur);background:rgba(122,90,248,.06)}
+
   /* ---------- grid + panels ---------- */
   .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:16px}
   .panel{border:1px solid var(--line);border-radius:14px;background:var(--panel);
@@ -262,6 +310,18 @@
   </div>
 </div>
 
+<div class="bld-wrap" id="builderWrap" style="display:none">
+  <div class="bld-head">
+    <span class="bld-title">Builder · ralph roadmap</span>
+    <span class="bld-meta" id="bldMeta">—</span>
+    <span class="bld-prog-num" id="bldProgNum">—</span>
+  </div>
+  <div class="pbar" style="margin:10px 0 13px"><i id="bldBar"></i></div>
+  <div class="bld-stories" id="bldStories"></div>
+  <div class="label" style="margin-top:15px">what ralph changed <span class="lr" id="bldChCount"></span></div>
+  <div class="bld-changes" id="bldChanges"></div>
+</div>
+
 <div class="grid">
 
   <div class="panel s7">
@@ -426,6 +486,15 @@ function renderPipeline(st, fresh) {
   const ebw = $("evalBarWrap"), eb = $("evalBar"), et = $("evalText");
   ebw.style.display = "none"; et.textContent = "";
   if (!st) { pd.textContent = "no heartbeat yet — loop has not run"; kb.style.display = "none"; return; }
+  if (st.phase && String(st.phase).startsWith("ralph")) {
+    PHASES.forEach(p => { const el = $("ph-" + p); el.className = "ph"; });
+    kb.style.display = "none";
+    const m = { "ralph-build": `building ${st.story || "a story"} — Gemini is writing the patch`,
+      "ralph-refine": `refining ${st.story || "the story"} — gate was red, attempt ${st.attempt || 1}`,
+      "ralph-idle": `builder idle${st.result ? " — last result: " + esc(st.result) : ""}` }[st.phase] || esc(st.phase);
+    pd.innerHTML = `<span style="color:var(--cyan)">ralph</span> · iter #${st.iteration ?? "?"} · ${m} · see the builder panel below`;
+    return;
+  }
   if (st.kind) { kb.style.display = ""; kb.className = "kind " + st.kind; kb.textContent = st.kind; }
   else kb.style.display = "none";
 
@@ -811,16 +880,63 @@ function renderTop(s, fresh) {
   $("fMode").textContent = s.demo ? "demo (synthetic)" : "live workspace";
 }
 
+/* ---------------- builder (ralph) ---------------- */
+function renderDiff(t) {
+  return esc(t).split("\n").map(l => {
+    let c = "";
+    if (l.startsWith("+") && !l.startsWith("+++")) c = "di-add";
+    else if (l.startsWith("-") && !l.startsWith("---")) c = "di-del";
+    else if (l.startsWith("@@")) c = "di-hunk";
+    return `<span class="di ${c}">${l || " "}</span>`;
+  }).join("");
+}
+function renderBuilder(s) {
+  const r = s.ralph, wrap = $("builderWrap");
+  if (!r || (!r.state && !(r.events && r.events.length))) { wrap.style.display = "none"; return; }
+  wrap.style.display = "";
+  const st = r.state || {}, stories = st.stories || [];
+  const total = st.total || stories.length || 0, done = st.done || 0;
+  $("bldMeta").innerHTML = `${esc(st.model || "—")} · ` + (st.running
+    ? `iter <b style="color:var(--txt)">${st.iteration ?? "?"}</b>${st.max_iters ? "/" + st.max_iters : ""}`
+    : `<span style="color:var(--grn)">run finished</span>`);
+  $("bldProgNum").textContent = `${done}/${total} stories done`;
+  $("bldBar").style.width = total ? Math.round(100 * done / total) + "%" : "0%";
+  const dot = { done: "✓", building: "▸", red: "✕", pending: "·" };
+  $("bldStories").innerHTML = stories.map(x =>
+    `<span class="story st-${esc(x.status || "pending")}" title="${esc(x.title)}">` +
+    `<b>${esc(x.id)}</b> <span class="st-dot">${dot[x.status] || "·"}</span> ` +
+    `${esc((x.title || "").slice(0, 48))}</span>`).join("") ||
+    `<span style="color:var(--mut2)">no stories</span>`;
+  const evs = (r.events || []).slice().reverse();
+  $("bldChCount").textContent = evs.length ? `${evs.length} build event(s) · newest first` : "";
+  $("bldChanges").innerHTML = evs.map(ev => {
+    const rc = { green: "rb-green", partial: "rb-amb", red: "rb-red", rejected: "rb-red" }[ev.result] || "rb-amb";
+    const files = (ev.changes || []).map(c => c.diff
+      ? `<details><summary>${esc(c.action || "edit")} ${esc(c.path)} · <span style="color:var(--grn)">+${c.added || 0}</span>/<span style="color:var(--red)">−${c.removed || 0}</span></summary><div class="diff">${renderDiff(c.diff)}</div></details>`
+      : `<div class="chg-file">${esc(c.action || "edit")} ${esc(c.path)} · +${c.added || 0}/−${c.removed || 0}</div>`
+    ).join("");
+    return `<div class="chg"><div class="chg-top">` +
+      `<span class="rb ${rc}">${esc(ev.result)}</span> <b>${esc(ev.story)}</b> ` +
+      `<span class="chg-ttl">${esc((ev.title || "").slice(0, 64))}</span>` +
+      `<span class="chg-meta">iter ${ev.iteration ?? "?"}${ev.commit ? " · " + esc(ev.commit) : ""} · ${ago(ev.ts)}</span></div>` +
+      (ev.note ? `<div class="chg-note">${esc(ev.note)}</div>` : "") +
+      (ev.result !== "green" && ev.detail ? `<div class="chg-note" style="color:var(--red)">${esc(ev.detail)}</div>` : "") +
+      `<div class="chg-files">${files || '<span style="color:var(--mut2);font-size:11px">no file changes recorded</span>'}</div></div>`;
+  }).join("") || `<span style="color:var(--mut2);font-size:11.5px">no build events yet</span>`;
+}
+
 /* ---------------- master render ---------------- */
 function render(s) {
   snap = s; recvWall = Date.now();
   const st = s.status;
   const fresh = !!st && (s.now - st.ts) < 240;
-  const empty = !st && !s.state && !(s.ledger && s.ledger.length);
+  const hasRalph = !!(s.ralph && (s.ralph.state || (s.ralph.events && s.ralph.events.length)));
+  const empty = !st && !s.state && !(s.ledger && s.ledger.length) && !hasRalph;
   $("hero").style.display = empty ? "" : "none";
   $("pipeWrap").style.display = empty ? "none" : "";
   renderTop(s, fresh);
   renderPipeline(st, fresh);
+  renderBuilder(s);
   renderThinking(s.thoughts);
   renderVitals(s);
   renderChart(s.ledger);

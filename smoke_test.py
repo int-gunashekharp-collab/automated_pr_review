@@ -306,3 +306,47 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+def _test_outcomes():
+    import outcomes
+    import json
+    import os
+    import sys
+    print("---- outcomes smoke ----")
+    def fake_run_gh(args):
+        if "list" in args:
+            return '[{"number": 100}]'
+        if "view" in args:
+            return json.dumps({
+              "reviewThreads": [
+                {
+                  "isResolved": True,
+                  "path": "src/main.py",
+                  "comments": [{"author": {"login": "snabbit-bot"}, "body": "Bot finding"}]
+                },
+                {
+                  "isResolved": False,
+                  "path": "src/other.py",
+                  "comments": [
+                    {"author": {"login": "snabbit-bot"}, "body": "Rebutted finding"},
+                    {"author": {"login": "human"}, "body": "No I disagree"}
+                  ]
+                }
+              ]
+            })
+        return "[]"
+    os.environ["LOOP_AI_REVIEWER_LOGIN"] = "snabbit-bot"
+    stats = outcomes.mine_outcomes(run_gh=fake_run_gh)
+    if stats.get("new_acted_on") != 1 or stats.get("new_dismissed") != 1:
+        print(f"SMOKE TEST FAILED: outcomes stats incorrect: {stats}")
+        sys.exit(1)
+    print("  [PASS] extracted acted_on and dismissed stats")
+    
+    stats2 = outcomes.mine_outcomes(run_gh=fake_run_gh)
+    if stats2.get("new_acted_on") != 0:
+        print("SMOKE TEST FAILED: outcomes dedupe failed")
+        sys.exit(1)
+    print("  [PASS] deduplicated successfully on re-run")
+
+if __name__ == "__main__":
+    _test_outcomes()

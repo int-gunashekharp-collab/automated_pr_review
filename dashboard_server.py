@@ -185,6 +185,16 @@ def _attempts(ws: Path):
     }
 
 
+def _ralph(ws: Path):
+    """Builder telemetry: roadmap snapshot (ralph_state.json) + the per-iteration
+    build events with file diffs (ralph.jsonl). None when ralph hasn't run."""
+    state = _read_json(ws / "ralph_state.json")
+    events = _tail_jsonl(ws / "ralph.jsonl", 30)
+    if not state and not events:
+        return None
+    return {"state": state, "events": events}
+
+
 def build_snapshot(P: Paths) -> dict:
     ws = P.workspace
     hist_dir = ws / "history"
@@ -193,6 +203,7 @@ def build_snapshot(P: Paths) -> dict:
         "demo": DEMO,
         "workspace": str(ws),
         "corpus_total": _corpus_total(),
+        "ralph": _ralph(ws),
         "attempts": _attempts(ws),
         "silver": _silver(ws),
         "status": _read_json(ws / "status.json"),
@@ -209,7 +220,7 @@ def build_snapshot(P: Paths) -> dict:
 def _watch_signature(P: Paths):
     sig = []
     for name in ("status.json", "thoughts.jsonl", "ledger.jsonl", "state.json",
-                 "attempts.jsonl", "silver.jsonl"):
+                 "attempts.jsonl", "silver.jsonl", "ralph.jsonl", "ralph_state.json"):
         f = P.workspace / name
         try:
             st = f.stat()
@@ -416,12 +427,99 @@ def run_demo_writer(ws: Path, speed: float):
         with (ws / "ledger.jsonl").open("a") as fh:
             fh.write(json.dumps(rec) + "\n")
 
+    # --- builder (ralph) demo: roadmap + per-story change events with diffs ---
+    RALPH_STORIES = [
+        ("S1", "Outcome mining: harvest production shadow-review outcomes"),
+        ("S2", "Outcome feedback: dismissed → do-not-flag, acted-on misses → propose"),
+        ("S3", "Caught-beyond-humans counter"),
+        ("S4", "Counterfactual replay: champion vs live skill on recent merged PRs"),
+        ("S5", "Severity-weighted recall (reported, not gating)"),
+        ("S6", "Rubric routing by changed-file paths (behind LOOP_ROUTING=1)"),
+    ]
+    ralph_titles = dict(RALPH_STORIES)
+    ralph_done = [0]
+
+    def _ddiff(path, body):
+        lines = body.strip("\n").split("\n")
+        return "\n".join([f"--- a/{path}", f"+++ b/{path}",
+                          f"@@ -0,0 +1,{len(lines)} @@"] + ["+" + l for l in lines])
+
+    RALPH_FILES = {
+        "S1": [("outcomes.py", "create", _ddiff("outcomes.py",
+                "import json, subprocess\n\nLOOP_AI_REVIEWER_LOGIN = 'maestro-ai[bot]'\n\n"
+                "def mine_outcomes(prs=30, _gh=None):\n"
+                "    \"\"\"Classify the AI reviewer's comments on merged PRs.\"\"\"\n"
+                "    out = []\n    for pr in _recent_merged(prs, _gh):\n"
+                "        for c in _ai_comments(pr):\n"
+                "            out.append({'pr': pr, 'verdict': _classify(c)})\n    return out")),
+               ("smoke_test.py", "append",
+                "--- a/smoke_test.py\n+++ b/smoke_test.py\n@@ +1,5 @@\n"
+                "+    outs = outcomes.mine_outcomes(prs=2, _gh=stub_gh)\n"
+                "+    assert {o['verdict'] for o in outs} <= {'acted_on','dismissed','unknown'}\n"
+                "+    assert len(outs) == len({o['pr'] for o in outs})  # dedupe\n"
+                "+    print('  [PASS] S1 outcome mining classify + dedupe')")],
+        "S2": [("proposer.py", "append", _ddiff("proposer.py",
+                "def outcome_inputs(outcomes):\n"
+                "    \"\"\"dismissed → subtraction pressure; acted-on misses → propose.\"\"\"\n"
+                "    return {'do_not_flag': [o for o in outcomes if o['verdict']=='dismissed']}"))],
+    }
+
+    def write_ralph_state(building, done):
+        stories = []
+        for k, (sid, title) in enumerate(RALPH_STORIES):
+            stt = "done" if k < done else "building" if sid == building else "pending"
+            stories.append({"id": sid, "priority": k + 1, "title": title, "status": stt})
+        rst = {"ts": round(time.time(), 3), "model": "gemini-3.1-pro-preview",
+               "project": "snabbit-ai-productivity", "running": True,
+               "iteration": done + (1 if building else 0), "max_iters": 6,
+               "phase": "ralph-build" if building else "ralph-idle",
+               "current": building, "done": done, "total": len(RALPH_STORIES),
+               "stories": stories}
+        tmp = ws / ".ralph_state.json.tmp"
+        tmp.write_text(json.dumps(rst))
+        tmp.replace(ws / "ralph_state.json")
+
+    def ralph_event(sid, result, files, note, commit, it):
+        changes = []
+        for path, action, diff in files:
+            dl = diff.split("\n")
+            changes.append({"path": path, "action": action,
+                            "added": sum(1 for l in dl if l.startswith("+") and not l.startswith("+++")),
+                            "removed": sum(1 for l in dl if l.startswith("-") and not l.startswith("---")),
+                            "diff": diff})
+        rec = {"ts": round(time.time(), 3), "iteration": it, "story": sid,
+               "title": ralph_titles[sid], "result": result, "done": result == "green",
+               "changes": changes, "note": note, "commit": commit, "refines": 0, "detail": ""}
+        with (ws / "ralph.jsonl").open("a") as fh:
+            fh.write(json.dumps(rec) + "\n")
+
+    def advance_ralph(it):
+        order = [sid for sid, _ in RALPH_STORIES]
+        done = ralph_done[0]
+        if done >= len(order) or it == 0 or it % 4 != 0:
+            return
+        sid = order[done]
+        files = RALPH_FILES.get(sid, [(f"{sid.lower()}_feature.py", "create",
+                _ddiff(f"{sid.lower()}_feature.py", f"# {sid} (demo)\nENABLED = True"))])
+        ralph_event(sid, "green", files, f"{sid} shipped; offline smoke green",
+                    f"{(it * 7) & 0xfffffff:07x}", it)
+        ralph_done[0] = done + 1
+        nxt = order[done + 1] if done + 1 < len(order) else None
+        write_ralph_state(nxt, done + 1)
+
+    # seed: S1 already done (with a real change event), S2 building
+    ralph_event("S1", "green", RALPH_FILES["S1"],
+                "outcomes.py + offline smoke checks; green", "a1b2c3d", 0)
+    ralph_done[0] = 1
+    write_ralph_state("S2", 1)
+
     status("startup")
     write_champion()
     write_state(round(len(passing) / len(ids), 3))
     it = 0
     while True:
         it += 1
+        advance_ralph(it)
         kind = ("consolidate" if it % 5 == 0 else "corpus" if it % 2 == 0 else "propose")
         topic, rule, file, prs = _DEMO_PATTERNS[(it // 2) % len(_DEMO_PATTERNS)]
         if it == 2:
