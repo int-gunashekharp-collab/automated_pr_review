@@ -38,6 +38,7 @@ import dataset
 import exporter
 import harness_bridge as hb
 import metrics
+import outcomes
 import precision
 import proposer
 import silver
@@ -738,8 +739,18 @@ def main():
                     help="list silver eval cases (active + retired)")
     ap.add_argument("--retire-silver", metavar="ID", default=None,
                     help="retire a bad silver case (kept in history, out of the eval)")
+    ap.add_argument("--mine-outcomes", action="store_true",
+                    help="mine outcomes of the AI reviewer's comments on merged PRs")
     args = ap.parse_args()
 
+    if args.mine_outcomes:
+        stats = outcomes.mine_outcomes()
+        print(f"mined {stats.get('scanned_prs', 0)} PRs: "
+              f"+{stats.get('new_acted_on', 0)} acted_on, "
+              f"+{stats.get('new_dismissed', 0)} dismissed, "
+              f"+{stats.get('new_unknown', 0)} unknown "
+              f"(append-only to {config.WORKSPACE / 'outcomes.jsonl'})")
+        return None
     if args.harvest_silver:
         hv = silver.harvest(0)
         print(f"admitted {hv['admitted']} case(s): {', '.join(hv['ids']) or '—'}"

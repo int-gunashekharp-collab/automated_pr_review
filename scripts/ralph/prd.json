@@ -1,12 +1,12 @@
 {
-  "project": "self-improving PR-reviewer loop — roadmap v3",
+  "project": "self-improving PR-reviewer loop \u2014 roadmap v3",
   "branchName": "ralph/loop-v3",
   "description": "Game-changer additions on top of the v2 loop. Every story is additive, env-gated, offline-smoke-tested, and never writes outside the loop folder. maestro-core is read-only, always.",
   "userStories": [
     {
       "id": "S1",
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "title": "Outcome mining: harvest production shadow-review outcomes",
       "asA": "loop operator",
       "iWant": "an outcomes.py that mines what happened to the PRODUCTION AI reviewer's comments on recent merged PRs (acted-on vs dismissed)",
@@ -88,7 +88,7 @@
       "soThat": "the rubric can grow past the size budget without raising prompt noise",
       "acceptanceCriteria": [
         "routing map workspace/champion-skill/routing.json (created/maintained on the COPY only); unmatched files always included as core",
-        "LOOP_ROUTING=0 (default) is byte-identical to current behaviour — proven by a smoke equivalence check",
+        "LOOP_ROUTING=0 (default) is byte-identical to current behaviour \u2014 proven by a smoke equivalence check",
         "with routing on, skill_size budget applies to the ROUTED prompt size per review",
         "smoke stays green"
       ]

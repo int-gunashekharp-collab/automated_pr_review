@@ -350,3 +350,53 @@ def _test_outcomes():
 
 if __name__ == "__main__":
     _test_outcomes()
+
+def _test_cli_outcomes():
+    import sys
+    import os
+    import loop
+    import outcomes
+    from unittest.mock import patch
+
+    def fake_run_gh(args):
+        if "list" in args:
+            return '[{"number": 101}]'
+        if "view" in args:
+            import json
+            return json.dumps({
+              "reviewThreads": [
+                {
+                  "isResolved": True,
+                  "path": "src/cli.py",
+                  "comments": [{"author": {"login": "snabbit-bot"}, "body": "CLI test finding"}]
+                }
+              ]
+            })
+        return "[]"
+
+    print("---- loop.py --mine-outcomes CLI smoke ----")
+    os.environ["LOOP_AI_REVIEWER_LOGIN"] = "snabbit-bot"
+    with patch.object(sys, "argv", ["loop.py", "--mine-outcomes"]):
+        with patch("outcomes._default_run_gh", side_effect=fake_run_gh):
+            try:
+                loop.main()
+            except SystemExit as e:
+                if e.code != 0:
+                    print(f"SMOKE TEST FAILED: CLI --mine-outcomes exited with {e.code}")
+                    sys.exit(1)
+    
+    import config
+    outcomes_file = config.WORKSPACE / "outcomes.jsonl"
+    found = False
+    if outcomes_file.exists():
+        for line in outcomes_file.read_text().splitlines():
+             if '"CLI test finding"' in line:
+                 found = True
+                 break
+    if not found:
+        print("SMOKE TEST FAILED: CLI --mine-outcomes did not append to outcomes.jsonl")
+        sys.exit(1)
+    print("  [PASS] CLI --mine-outcomes completed")
+
+if __name__ == "__main__":
+    _test_cli_outcomes()
