@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 import config
+import maestro_context
 import telemetry
 
 EDIT_PROMPT = """You maintain the maestro-core PR-review conventions skill. An
@@ -33,6 +34,8 @@ false positives, and stop flagging the dismissed patterns.
 
 Hard rules:
 - Be mechanism-specific: name the exact pattern, the failure, and the bug class.
+- Ground it in the MAESTRO-CORE CONTEXT below — cite real modules/files/patterns
+  from THIS codebase, not generic advice.
 - Do NOT write a rule that just names a specific PR/file from a miss — that is
   memorisation. Generalise to the underlying pattern so it transfers to unseen
   code.
@@ -50,6 +53,9 @@ Reply with ONLY this JSON, no prose around it:
   ]
 }}
 "append" appends to an existing file; "create" makes references/<name>.md.
+
+=== MAESTRO-CORE CONTEXT (read-only — how this codebase works; ground your rule in it) ===
+{maestro_context}
 
 === CURRENT SKILL ===
 {skill}
@@ -90,6 +96,9 @@ Reply with ONLY this JSON, no prose:
     {{"file": "references/<name>.md", "action": "append", "content": "<markdown rule>"}}
   ]
 }}
+
+=== MAESTRO-CORE CONTEXT (read-only — how this codebase works; ground your rule in it) ===
+{maestro_context}
 
 === CURRENT SKILL ===
 {skill}
@@ -262,6 +271,16 @@ def _finish(raw: str) -> dict:
     return patch
 
 
+def _ctx() -> str:
+    """maestro-core grounding for the proposer prompt (config-gated, crash-proof)."""
+    if not getattr(config, "MAESTRO_CONTEXT", False):
+        return "(maestro-core grounding disabled — set LOOP_MAESTRO_CONTEXT=1)"
+    try:
+        return maestro_context.load_context()
+    except Exception:  # noqa: BLE001 — grounding must never break a proposal
+        return "(maestro-core grounding unavailable)"
+
+
 def propose_edit(champion_dir: Path, eval_result: dict, *,
                  false_positives=None, dismissed_outcomes=None, call_model_fn=None,
                  failed_attempts: list[dict] | None = None,
@@ -275,6 +294,7 @@ def propose_edit(champion_dir: Path, eval_result: dict, *,
     call_model_fn = call_model_fn or _default_call_model
     prompt = EDIT_PROMPT.format(
         noise=eval_result.get("noise"),
+        maestro_context=_ctx(),
         skill=_full_skill_text(champion_dir),
         misses=_format_misses(eval_result.get("missed_train", eval_result.get("missed", []))),
         fps=_format_fps(false_positives or []),
@@ -308,6 +328,7 @@ def propose_from_corpus(champion_dir: Path, comments: list[dict], *,
     May return {"edits": []} when nothing new recurs — the loop then skips."""
     call_model_fn = call_model_fn or _default_call_model
     prompt = CORPUS_PROMPT.format(
+        maestro_context=_ctx(),
         skill=_full_skill_text(champion_dir), comments=_format_corpus(comments),
         acted_on=_format_outcomes(acted_on_outcomes))
     raw = call_model_fn(prompt)

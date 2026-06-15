@@ -129,6 +129,27 @@
   .di-del{background:rgba(229,96,79,.10);color:#9e4538}
   .di-hunk{color:var(--pur);background:rgba(122,90,248,.06)}
 
+  /* ---------- lifetime scorecard ---------- */
+  .sc-wrap{border:1px solid var(--line);border-radius:14px;background:var(--panel);
+           padding:14px 18px;margin-bottom:16px;position:relative;overflow:hidden;display:flex;
+           align-items:center;gap:24px;flex-wrap:wrap;
+           box-shadow:0 1px 2px rgba(16,24,40,.04), 0 10px 32px rgba(16,24,40,.05)}
+  .sc-wrap::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:var(--aurora);opacity:.85}
+  .sc-big{display:flex;flex-direction:column;gap:2px;min-width:150px}
+  .sc-big .lab{font-size:10px;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--mut);
+               display:flex;align-items:center;gap:8px}
+  .sc-big .val{font-size:34px;font-weight:300;font-variant-numeric:tabular-nums;line-height:1.05}
+  .sc-big .val b{background:var(--aurora);-webkit-background-clip:text;background-clip:text;color:transparent;font-weight:400}
+  .sc-big .sub{font-size:11px;color:var(--mut2)}
+  .sc-delta{font-size:11px;font-weight:600;font-variant-numeric:tabular-nums}
+  .sc-delta.up{color:var(--grn)} .sc-delta.dn{color:var(--red)}
+  .sc-spark{flex:1;min-width:150px;height:46px}
+  .sc-stats{display:flex;gap:10px;flex-wrap:wrap}
+  .sc-stat{border:1px solid var(--line);border-radius:11px;padding:8px 13px;background:#f7f9fc;min-width:92px}
+  .sc-stat .t{font-size:9px;font-weight:500;letter-spacing:.12em;text-transform:uppercase;color:var(--mut);margin-bottom:4px}
+  .sc-stat .n{font-size:19px;font-weight:300;color:var(--txt);font-variant-numeric:tabular-nums}
+  .sc-stat.grad .n{color:var(--grn)} .sc-stat.hal .n{color:var(--amb)} .sc-stat.bey .n{color:var(--pur)}
+
   /* ---------- grid + panels ---------- */
   .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:16px}
   .panel{border:1px solid var(--line);border-radius:14px;background:var(--panel);
@@ -286,7 +307,6 @@
 <div class="top">
   <div class="orb" id="orb"></div>
   <h1>PR-reviewer <b>loop</b></h1>
-  <span class="chip demo" id="demoBadge" style="display:none">demo data</span>
   <span class="chip" id="iterChip">iter <b>—</b></span>
   <span class="chip" id="uptimeChip">uptime <b>—</b></span>
   <span class="chip" id="modelChip">—</span>
@@ -320,6 +340,22 @@
   <div class="bld-stories" id="bldStories"></div>
   <div class="label" style="margin-top:15px">what ralph changed <span class="lr" id="bldChCount"></span></div>
   <div class="bld-changes" id="bldChanges"></div>
+</div>
+
+<div class="sc-wrap" id="scorecardWrap" style="display:none">
+  <div class="sc-big">
+    <span class="lab">Autonomy · learned from humans <span class="sc-delta" id="scDelta"></span></span>
+    <span class="val"><b id="scPct">—</b></span>
+    <span class="sub" id="scSub">—</span>
+  </div>
+  <svg class="sc-spark" id="scSpark" viewBox="0 0 240 46" preserveAspectRatio="none"></svg>
+  <div class="sc-stats">
+    <div class="sc-stat grad"><div class="t">graduated</div><div class="n" id="scGrad">—</div></div>
+    <div class="sc-stat hal"><div class="t">hallucination</div><div class="n" id="scHal">—</div></div>
+    <div class="sc-stat bey"><div class="t">beyond humans</div><div class="n" id="scBey">—</div></div>
+    <div class="sc-stat"><div class="t">PRs reviewed</div><div class="n" id="scPrs">—</div></div>
+    <div class="sc-stat"><div class="t">runs</div><div class="n" id="scRuns">—</div></div>
+  </div>
 </div>
 
 <div class="grid">
@@ -430,6 +466,7 @@
   <span>model <b id="fModel">—</b></span>
   <span>project <b id="fProj">—</b></span>
   <span>mode <b id="fMode">—</b></span>
+  <span>grounding <b id="fGround">—</b></span>
 </div>
 
 <script>
@@ -853,7 +890,6 @@ function renderMisses(state) {
 /* ---------------- alerts + top ---------------- */
 function renderTop(s, fresh) {
   const st = s.status, cfg = s.config || {};
-  $("demoBadge").style.display = s.demo ? "" : "none";
   const lastIter = st && st.iter != null ? st.iter :
     (s.ledger && s.ledger.length ? s.ledger[s.ledger.length - 1].iter : null);
   $("iterChip").innerHTML = `iter <b>${lastIter ?? "—"}</b>`;
@@ -882,7 +918,11 @@ function renderTop(s, fresh) {
   $("fRoot").textContent = cfg.maestro_root || "—";
   $("fModel").textContent = cfg.model || "—";
   $("fProj").textContent = cfg.project || "—";
-  $("fMode").textContent = s.demo ? "demo (synthetic)" : "live workspace";
+  $("fMode").textContent = "live workspace";
+  const g = [];
+  if (cfg.use_mcp) g.push("reviewer·MCP");
+  if (cfg.maestro_context) g.push("proposer·docs");
+  $("fGround").textContent = g.length ? g.join(" + ") : "off";
 }
 
 /* ---------------- builder (ralph) ---------------- */
@@ -930,6 +970,35 @@ function renderBuilder(s) {
   }).join("") || `<span style="color:var(--mut2);font-size:11.5px">no build events yet</span>`;
 }
 
+/* ---------------- lifetime scorecard ---------------- */
+function renderScorecard(s) {
+  const sc = s.scorecard, wrap = $("scorecardWrap");
+  if (!sc || sc.autonomy_pct == null) { wrap.style.display = "none"; return; }
+  wrap.style.display = "";
+  $("scPct").textContent = sc.autonomy_pct + "%";
+  $("scSub").textContent = `${sc.autonomous_now ?? "?"} of ${sc.human_flagged_total ?? "?"} `
+    + "human-flagged patterns caught without a human";
+  const d = (sc.autonomy_first != null) ? Math.round((sc.autonomy_pct - sc.autonomy_first) * 10) / 10 : null;
+  const de = $("scDelta");
+  if (d == null) { de.textContent = ""; }
+  else { de.textContent = (d >= 0 ? "▲ +" : "▼ ") + d + " pts"; de.className = "sc-delta " + (d >= 0 ? "up" : "dn"); }
+  $("scGrad").textContent = sc.graduated ?? "—";
+  $("scHal").textContent = sc.hallucination_pct != null ? sc.hallucination_pct + "%" : "n/a";
+  $("scBey").textContent = sc.beyond_humans ?? "—";
+  $("scPrs").textContent = sc.prs_reviewed ?? "—";
+  $("scRuns").textContent = sc.runs ?? "—";
+  const pts = (sc.trajectory || []).map(t => t.autonomy_pct).filter(v => v != null);
+  const svg = $("scSpark");
+  if (pts.length < 2) { svg.innerHTML = ""; return; }
+  const W = 240, H = 46, pad = 4, mn = Math.min(...pts), mx = Math.max(...pts), rng = (mx - mn) || 1;
+  const xy = pts.map((v, i) => [pad + i * (W - 2 * pad) / (pts.length - 1), H - pad - (v - mn) / rng * (H - 2 * pad)]);
+  const line = xy.map(p => p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ");
+  const last = xy[xy.length - 1];
+  svg.innerHTML = `<polygon points="${pad},${H - pad} ${line} ${W - pad},${H - pad}" fill="rgba(15,165,115,.10)"/>`
+    + `<polyline points="${line}" fill="none" stroke="var(--grn)" stroke-width="1.6"/>`
+    + `<circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="2.6" fill="var(--grn)"/>`;
+}
+
 /* ---------------- master render ---------------- */
 function render(s) {
   snap = s; recvWall = Date.now();
@@ -942,6 +1011,7 @@ function render(s) {
   renderTop(s, fresh);
   renderPipeline(st, fresh);
   renderBuilder(s);
+  renderScorecard(s);
   renderThinking(s.thoughts);
   renderVitals(s);
   renderChart(s.ledger);

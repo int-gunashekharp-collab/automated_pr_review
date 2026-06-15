@@ -397,6 +397,101 @@ GLOBAL endpoint. (Note: `gemini-3-pro-preview` was discontinued 2026-03-26.)
      smoke still green; selftest leaves the real workspace clean. Still open:
      full multi-turn agentic editing (this is robust single-shot + retries, not a
      true tool-use agent) and the loop's own `recall=None` health issue (separate).
+15. **Eval-hardening + human-free core built (2026-06-13).** First increment of the
+   `ARCHITECTURE.md` human-free variant, on top of the now-live loop (recall came
+   back `None → 0.667` once `GOOGLE_CLOUD_PROJECT` was set):
+   - **Env auto-inject confirmed already present** — `harness_bridge.py` does
+     `os.environ.setdefault("GOOGLE_CLOUD_PROJECT", config.GCP_PROJECT)` (+
+     `GEMINI_MODEL`), so the eval/reviewer subprocess inherits them like the
+     proposer path. That is *why* the eval revived. Left as-is.
+   - **Explicit eval-liveness guard** at the top of `metrics.decide()` — refuses to
+     promote when the candidate eval is dead/degraded (`scoreable<=0` or > half the
+     cases errored). Errors aren't misses, so a dead candidate would otherwise slip
+     the regression guard. Complements the existing baseline guard (loop.py: FATAL
+     if baseline `scoreable==0`) and dead-state auto-discard.
+   - **Golden-optional / silver-primary** — new `LOOP_SILVER_PRIMARY` knob (default
+     OFF). `dataset.load_cases()` now returns `[]` (no crash) when golden is absent
+     or silver-primary; `loop.py main()` no longer hard-exits on missing golden — it
+     runs on the resolution-derived **silver** eval alone, with a clear
+     `--harvest-silver` message when both sources are empty. Default behaviour is
+     unchanged (loop still runs golden at 0.667).
+   - Verified: 3 new smoke checks (liveness rejects all-errored; silver-primary and
+     absent-golden `load_cases` return `[]`), full smoke green, py_compile clean;
+     `__pycache__` cleared. **Still designed-not-built:** shadow deployment + the
+     retrieval index. Run human-free: `python3 loop.py --harvest-silver` then
+     `LOOP_SILVER_PRIMARY=1 python3 loop.py --max-iters 5`.
+16. **Lifetime scorecard built (2026-06-13).** A cumulative, cross-run metric for
+   "is it improving or hallucinating, OVERALL" (not per-run). New `scorecard.py`
+   computes, from the resolution-derived silver eval:
+   - **AUTONOMY%** = (human-flagged patterns the current champion catches UNAIDED)
+     / (all-time human-flagged patterns) — the climbing improvement number.
+   - **GRADUATED** = patterns first MISSED but later caught (the pure "learned from
+     the human" count); **REGRESSED** = first caught, now missed (forgetting);
+     **HALLUCINATION%** = precision FP rate (false alarms on fixed code);
+     **BEYOND-HUMANS** = the S3 counter.
+   Grounded only in REAL signals (resolved comments, re-flagged fixed code), so the
+   metric can't be gamed by a hallucinating proposer; errors are NOT misses, so a
+   dead eval never moves it. Persisted across runs (survives `--fresh`):
+   `workspace/learning_ledger.json` (per-pattern source of truth) + append-only
+   `workspace/scorecard.jsonl` (the trajectory). Wired: `scorecard.update()` at
+   run-end in `run_loop` (prints the autonomy line), `python3 loop.py --scorecard`
+   CLI, and a dashboard "Autonomy · learned from humans" strip with a climbing
+   sparkline + graduated/hallucination/beyond-human chips + demo seed. Verified
+   offline: standalone engine (50%→100% with one graduation), 4 smoke checks,
+   demo snapshot serves the block (autonomy 41.5%→81.9% over 8 runs), JS valid,
+   full smoke green. View it: `python3 loop.py --scorecard`.
+17. **maestro-core grounding integrated (2026-06-13).** Gave the system maestro-core
+   context for better PR review — two sides:
+   - **Reviewer (already plumbed, now first-class):** `LOOP_WITH_MCP` /
+     `LOOP_WORKFLOW` flow through `harness_bridge` into the maestro-core harness's
+     **maestro-docs MCP** + 4-pass workflow. The MCP server + `with_mcp` logic live
+     inside maestro-core (read-only) — the loop just flips the flags; the live MCP
+     is verified on the Mac, not here.
+   - **Proposer (the new build, our side):** `maestro_context.py` reads a bounded,
+     **read-only** digest of maestro-core's OWN docs (architecture, conventions,
+     README, auto-review.yml) and injects it into `EDIT_PROMPT` + `CORPUS_PROMPT`,
+     so rubric edits cite real modules/patterns instead of generic advice. Gated by
+     `LOOP_MAESTRO_CONTEXT` (default ON; `LOOP_MAESTRO_CONTEXT_CHARS=8000`); degrades
+     to a no-op note when maestro-core is absent (smoke + maestro-less runs
+     unaffected). Never writes to maestro-core.
+   - **Dashboard:** config snapshot carries `use_mcp`/`use_workflow`/`maestro_context`;
+     footer shows `grounding: reviewer·MCP + proposer·docs`.
+   - Verified offline: 3 smoke checks (reads docs / tolerant when absent / prompts
+     format with the field), full smoke green, py_compile + dashboard JS clean.
+   - Run with full grounding:
+     `LOOP_WITH_MCP=1 LOOP_WORKFLOW=1 python3 loop.py` (proposer grounding is on by
+     default). Still maestro-core-side (read-only, not testable here): the MCP server.
+18. **Live maestro-docs MCP client wired into proposer grounding (2026-06-13).**
+   Extended `maestro_context.py` with a best-effort MCP-over-HTTP client (stdlib
+   `urllib`): initialize → tools/list → tools/call, returns text or None on ANY
+   failure, **falling back to local docs**. `load_context()` now prefers the LIVE
+   maestro-docs MCP when `MAESTRO_DOCS_MCP_URL` + `_TOKEN` are set, else reads
+   local docs. Config knobs (URL/TOKEN/TOOL/QUERY) load from a **gitignored `.env`**
+   via `config._load_dotenv()` (setdefault, so shell exports win) — the token
+   **never lives in code/git** (verified: `.env` is gitignored and excluded from
+   `git add -A`) and is never logged. `python3 maestro_context.py --tools` lists
+   the MCP's tools so the right one can be pinned (`MAESTRO_DOCS_MCP_TOOL`).
+   Verified offline (stubbed): live-context path used, graceful fallback on
+   failure, tolerant when nothing configured; smoke +1 (MCP-failure→docs), full
+   smoke green. **LIVE test is on the Mac:** `.env` has the url+token →
+   `python3 maestro_context.py --tools`, then `python3 loop.py`. Token rotation is
+   pending (user will rotate after testing).
+19. **"PRs reviewed completely" counter + stuck-metric diagnosis (2026-06-13).**
+   User saw the scorecard "stuck" — actually it moved correctly: autonomy 100%
+   (3/3 patterns) → **42.9% (3/7)** after harvesting 4 more silver patterns, i.e.
+   the reviewer catches 3 of 7 human-flagged patterns and misses 4 of the new
+   harder ones (exactly the intended behaviour — now there's room to learn). It's
+   flat at 42.9% because the loop hasn't PROMOTED yet (0 promotions; first edit
+   rejected as a regression) — honest plateau, not a bug; the maestro grounding
+   should help it propose better. NEW metric: `harness_bridge` appends each FRESH
+   review's PR to `workspace/review_stats.json` (`_bump_review_stats`, cumulative,
+   survives champion changes); `config.REVIEW_STATS_FILE`. `scorecard` surfaces
+   `prs_reviewed` (distinct) + `reviews_completed` (total) in update/lifetime/
+   `format_scorecard` (`PRS REVIEWED` line) and the dashboard strip (`scPrs`).
+   Backfilled from the existing evalcache → **71 reviews, 15 distinct PRs**.
+   Verified: counter math, full smoke green, JS valid. Note: checkpoint reuse on
+   restart won't re-count old reviews (hence the backfill); the dashboard shows the
+   stat after a loop restart (new code writes it into the scorecard trajectory).
 
 ---
 

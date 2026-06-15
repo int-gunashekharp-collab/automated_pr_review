@@ -87,6 +87,22 @@ def decide(*, kind: str, champ: dict, cand: dict, train_ids: set[str],
            noise_tol: float, max_size: int,
            champ_fp: float | None = None, cand_fp: float | None = None,
            precision_tol: float = 0.0) -> tuple[bool, str]:
+    # --- liveness: never promote against a DEAD measurement ---
+    # If the candidate eval couldn't actually score (every / most case errored —
+    # e.g. a missing GOOGLE_CLOUD_PROJECT killed the reviewer), there is no
+    # evidence to act on. Errors are NOT misses, so a dead candidate would
+    # otherwise slip past the regression guard (which ignores errored cases).
+    cper = cand.get("per_case", [])
+    n_err = cand.get("errored")
+    if n_err is None:
+        n_err = sum(1 for r in cper if "error" in r)
+    n_score = cand.get("scoreable")
+    if n_score is None:
+        n_score = len(cper) - n_err
+    if n_score <= 0 or (cper and n_err > len(cper) / 2):
+        return False, (f"eval dead — {n_err}/{len(cper)} cases errored; "
+                       "refusing to promote on a broken measurement")
+
     # --- hard guards (apply to every mutation kind) ---
     regs = regressions(champ, cand)
     if regs:

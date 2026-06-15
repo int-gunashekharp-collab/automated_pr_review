@@ -90,6 +90,32 @@ def _prune_eval_cache(keep: int = 80):
         pass
 
 
+def _bump_review_stats(prs: list) -> None:
+    """Cumulative 'PRs reviewed completely' counter — survives champion changes
+    (unlike the per-fingerprint eval cache). reviews = total review completions;
+    prs = the distinct PRs ever reviewed. Crash-proof, atomic."""
+    if not prs:
+        return
+    try:
+        f = config.REVIEW_STATS_FILE
+        cur = {"reviews": 0, "prs": []}
+        if f.exists():
+            try:
+                cur = json.loads(f.read_text())
+            except Exception:
+                pass
+        cur["reviews"] = int(cur.get("reviews", 0)) + len(prs)
+        seen = set(cur.get("prs", [])) | {p for p in prs if p is not None}
+        cur["prs"] = sorted(seen, key=lambda x: str(x))
+        cur["updated"] = round(time.time(), 3)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(cur))
+        os.replace(tmp, f)
+    except Exception:
+        pass
+
+
 def evaluate(skill_dir: Path, cases: list[dict], *, label: str, trials: int = 1,
              get_diff_fn=None, run_reviewer_fn=None) -> dict:
     """Score `skill_dir` over `cases`. With trials>1 each case is reviewed
@@ -122,6 +148,7 @@ def evaluate(skill_dir: Path, cases: list[dict], *, label: str, trials: int = 1,
     _prune_eval_cache()
 
     per_case, missed, noise_samples = [], [], []
+    fresh_prs: list = []          # PRs reviewed FRESH this call (for the cumulative counter)
     passed = errored = reused = 0
 
     for ci, case in enumerate(cases):
@@ -182,11 +209,13 @@ def evaluate(skill_dir: Path, cases: list[dict], *, label: str, trials: int = 1,
                 "must_match_any": case.get("must_match_any", []),
                 "excerpt": ("" if case_passed else last_out[:1200]),
                 "ts": round(time.time(), 3)}) + "\n")
+        fresh_prs.append(case.get("pr"))
 
     if reused:
         print(f"[eval {label}] resumed from checkpoint: {reused} case(s) reused, "
               f"{len(cases) - reused} evaluated fresh", flush=True)
 
+    _bump_review_stats(fresh_prs)
     scoreable = len(cases) - errored
     return {
         "label": label,

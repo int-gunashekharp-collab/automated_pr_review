@@ -38,6 +38,22 @@ def _csv(name: str) -> set[str]:
     return {x.strip() for x in os.environ.get(name, "").split(",") if x.strip()}
 
 
+def _load_dotenv():
+    """Load KEY=VALUE lines from a gitignored .env so secrets (e.g. the MCP token)
+    stay out of code and git. Shell exports win (setdefault). Never raises."""
+    try:
+        for line in (Path(__file__).resolve().parent / ".env").read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+    except Exception:
+        pass
+
+
+_load_dotenv()   # must run before any os.environ.get below
+
+
 # --- where this loop lives (writes here only) ------------------------------
 LOOP_DIR = Path(__file__).resolve().parent
 
@@ -75,6 +91,7 @@ RUNS_DIR = WORKSPACE / "runs"
 HISTORY_DIR = WORKSPACE / "history"
 LEDGER_FILE = WORKSPACE / "ledger.jsonl"
 STATE_FILE = WORKSPACE / "state.json"
+REVIEW_STATS_FILE = WORKSPACE / "review_stats.json"   # cumulative 'PRs reviewed completely'
 REPORTS_DIR = LOOP_DIR / "reports"
 HOURLY_DIR = REPORTS_DIR / "hourly"
 ATTEMPTS_FILE = WORKSPACE / "attempts.jsonl"   # patch-fingerprint memory
@@ -113,8 +130,25 @@ PRECISION_SAMPLE = _i("LOOP_PRECISION_SAMPLE", 4)
 PRECISION_TOL = _f("LOOP_PRECISION_TOL", 0.0)
 
 # --- reviewer prompt fidelity ----------------------------------------------
+# The REVIEWER's maestro-core grounding (maestro-docs MCP + 4-pass workflow) lives
+# in the maestro-core harness; the loop just flips these on for production fidelity.
 USE_WORKFLOW = _b("LOOP_WORKFLOW", False)
 USE_MCP = _b("LOOP_WITH_MCP", False)
+
+# The PROPOSER's maestro-core grounding (this side, read-only): feed a bounded
+# digest of maestro-core's own docs into the rubric-edit prompts so changes cite
+# real modules/patterns. Degrades to a no-op when maestro-core is absent.
+MAESTRO_CONTEXT = _b("LOOP_MAESTRO_CONTEXT", True)
+MAESTRO_CONTEXT_CHARS = _i("LOOP_MAESTRO_CONTEXT_CHARS", 8000)
+
+# Optional: query the LIVE maestro-docs MCP for proposer grounding (else read
+# local docs). URL + token come from the gitignored .env / shell env, never code.
+MAESTRO_DOCS_MCP_URL = os.environ.get("MAESTRO_DOCS_MCP_URL", "").strip()
+MAESTRO_DOCS_MCP_TOKEN = os.environ.get("MAESTRO_DOCS_MCP_TOKEN", "").strip()
+MAESTRO_DOCS_MCP_TOOL = os.environ.get("MAESTRO_DOCS_MCP_TOOL", "").strip()
+MAESTRO_DOCS_MCP_QUERY = os.environ.get(
+    "MAESTRO_DOCS_MCP_QUERY",
+    "architecture, conventions and code-review guidelines for this codebase").strip()
 
 # --- loop cadence -----------------------------------------------------------
 REPORT_INTERVAL_SEC = _i("LOOP_REPORT_INTERVAL_SEC", 3600)
@@ -159,6 +193,10 @@ SILVER_SCAN = _i("LOOP_SILVER_SCAN", 200)      # corpus comments scanned per har
 SILVER_BATCH = _i("LOOP_SILVER_BATCH", 6)      # max cases admitted per harvest
 SILVER_MAX = _i("LOOP_SILVER_MAX", 30)         # cap on active silver cases (eval cost!)
 SILVER_MIN_CONF = _f("LOOP_SILVER_MIN_CONF", 0.7)
+# Human-free mode: make the resolution-derived silver eval the PRIMARY bar and
+# drop the golden-set dependency entirely (golden becomes an optional booster).
+# Off by default — the loop's behaviour is unchanged unless you opt in.
+SILVER_PRIMARY = _b("LOOP_SILVER_PRIMARY", False)
 
 # --- stub harness (tests only) ------------------------------------------------
 # Real runs FAIL LOUDLY if maestro-core is missing. Only when LOOP_ALLOW_STUB=1

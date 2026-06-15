@@ -195,6 +195,84 @@ def main():
                              noise_tol=0.1, max_size=99999)[0]
     check("consolidation accepts smaller+equal-recall", cons_ok is True)
 
+    # liveness: a dead (all-errored) candidate eval must never promote
+    dead = {"recall": None, "noise": 0.0, "passed": 0, "scoreable": 0, "errored": 2,
+            "per_case": [{"id": "aaa", "passed": False, "error": "GOOGLE_CLOUD_PROJECT is not set"},
+                         {"id": "bbb", "passed": False, "error": "GOOGLE_CLOUD_PROJECT is not set"}],
+            "missed": []}
+    dead_ok, dead_why = metrics.decide(kind="propose", champ=champ, cand=dead, train_ids={"aaa"},
+                                       val_ids={"bbb"}, champ_size=100, cand_size=100,
+                                       noise_tol=0.1, max_size=99999)
+    check("liveness guard rejects a dead (all-errored) eval", dead_ok is False and "dead" in dead_why)
+
+    # human-free mode: load_cases() must not require a golden set
+    import dataset as _ds
+    _sp, _gf = config.SILVER_PRIMARY, config.GOLDEN_FILE
+    config.SILVER_PRIMARY = True
+    check("silver-primary: load_cases() drops the golden dependency", _ds.load_cases() == [])
+    config.SILVER_PRIMARY = False
+    config.GOLDEN_FILE = config.WORKSPACE / "_no_such_golden.jsonl"
+    check("absent golden: load_cases() tolerates a missing file", _ds.load_cases() == [])
+    config.SILVER_PRIMARY, config.GOLDEN_FILE = _sp, _gf
+
+    # ---- lifetime scorecard: the OVERALL autonomy/hallucination metric ----
+    import scorecard as _sc
+    _sc.LEDGER_FILE = config.WORKSPACE / "_sc_ledger.json"
+    _sc.TRAJ_FILE = config.WORKSPACE / "_sc_traj.jsonl"
+    _saved_sf = config.SILVER_FILE
+    config.SILVER_FILE = config.WORKSPACE / "_sc_silver.jsonl"
+    for _f in (_sc.LEDGER_FILE, _sc.TRAJ_FILE, config.SILVER_FILE):
+        if _f.exists():
+            _f.unlink()
+    # two human-flagged patterns: h1 the AI could already catch, h2 it could not
+    config.SILVER_FILE.write_text("\n".join(json.dumps(r) for r in [
+        {"id": "h1", "baseline_passed": True, "human_said": "use the enum", "status": "active"},
+        {"id": "h2", "baseline_passed": False, "human_said": "add an index", "status": "active"}]))
+    r1 = _sc.update({"recall": 0.5, "per_case": [{"id": "h1", "passed": True},
+                                                 {"id": "h2", "passed": False}]}, fp_rate=0.0)
+    r2 = _sc.update({"recall": 1.0, "per_case": [{"id": "h1", "passed": True},
+                                                 {"id": "h2", "passed": True}]}, fp_rate=0.0, beyond_humans=1)
+    check("scorecard: autonomy% rises as patterns are learned",
+          r1["autonomy_pct"] == 50.0 and r2["autonomy_pct"] == 100.0)
+    check("scorecard: graduation (first-missed -> later-caught) counted", r2["graduated"] == 1)
+    lt = _sc.lifetime()
+    check("scorecard: lifetime persists across runs (trajectory)",
+          lt["runs"] == 2 and lt["autonomy_first"] == 50.0)
+    r3 = _sc.update({"recall": None, "per_case": [{"id": "h1", "error": "x"},
+                                                  {"id": "h2", "error": "x"}]}, fp_rate=None)
+    check("scorecard: a dead eval doesn't regress the ledger (errors != misses)",
+          r3["autonomy_pct"] == 100.0)
+    config.SILVER_FILE = _saved_sf
+
+    # ---- maestro-core grounding: proposer reads codebase docs (read-only) ----
+    import maestro_context as _mc
+    import proposer as _pr
+    _saved_mr = config.MAESTRO_ROOT
+    _mroot = config.WORKSPACE / "_fake_maestro"
+    (_mroot / "docs").mkdir(parents=True, exist_ok=True)
+    (_mroot / "docs" / "ai-pr-review-architecture.md").write_text(
+        "# Architecture\nThe event dispatcher uses an OUTBOX pattern for delivery.")
+    config.MAESTRO_ROOT = _mroot
+    _mc._cache.clear()
+    check("maestro grounding reads codebase docs", "OUTBOX pattern" in _mc.load_context())
+    # MCP configured but failing must fall back to local docs (never crash the proposer)
+    _su, _st, _sh = config.MAESTRO_DOCS_MCP_URL, config.MAESTRO_DOCS_MCP_TOKEN, _mc._handshake
+    config.MAESTRO_DOCS_MCP_URL, config.MAESTRO_DOCS_MCP_TOKEN = "https://x", "t"
+    def _boom(u, t):
+        raise RuntimeError("mcp down")
+    _mc._handshake = _boom
+    _mc._cache.clear()
+    check("MCP failure falls back to local docs", "OUTBOX pattern" in _mc.load_context())
+    config.MAESTRO_DOCS_MCP_URL, config.MAESTRO_DOCS_MCP_TOKEN, _mc._handshake = _su, _st, _sh
+    config.MAESTRO_ROOT = config.WORKSPACE / "_no_maestro"
+    _mc._cache.clear()
+    check("maestro grounding tolerant when absent", _mc.load_context() == _mc._NONE)
+    config.MAESTRO_ROOT = _saved_mr
+    _mc._cache.clear()
+    check("proposer EDIT_PROMPT carries the grounding section",
+          "MAESTRO-CORE CONTEXT" in _pr.EDIT_PROMPT.format(
+              noise=1, maestro_context="ctx", skill="s", misses="m", fps="f", dismissed="d"))
+
     # ---- fake outcomes data ----
     config.WORKSPACE.mkdir(parents=True, exist_ok=True)
     (config.WORKSPACE / "outcomes.jsonl").write_text(json.dumps(

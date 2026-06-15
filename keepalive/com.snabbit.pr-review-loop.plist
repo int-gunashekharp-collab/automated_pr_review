@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS LaunchAgent for the PR-review loop. This is the "keep running" option
+  that survives crashes, logout, and reboot (RunAtLoad + KeepAlive).
+
+  Install (copy-paste in your terminal):
+    cp "/Users/gunashekharp/testing workflow/src/data/loop_pr_reviewer/keepalive/com.snabbit.pr-review-loop.plist" ~/Library/LaunchAgents/
+    launchctl load -w ~/Library/LaunchAgents/com.snabbit.pr-review-loop.plist
+
+  Stop / uninstall:
+    launchctl unload -w ~/Library/LaunchAgents/com.snabbit.pr-review-loop.plist
+
+  Note: it still needs valid Vertex auth. If it's idle, check
+  workspace/loop_supervisor.log — if it asks for auth, run once:
+    gcloud auth application-default login
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.snabbit.pr-review-loop</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/gunashekharp/testing workflow/src/data/loop_pr_reviewer/keepalive/keep_running.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/gunashekharp/testing workflow/src/data/loop_pr_reviewer</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/gunashekharp/testing workflow/src/data/loop_pr_reviewer/workspace/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/gunashekharp/testing workflow/src/data/loop_pr_reviewer/workspace/launchd.err.log</string>
+
+  <!-- launchd starts with a bare PATH; give it the common locations. The
+       supervisor script also self-heals PATH from your shell profile. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/Users/gunashekharp/google-cloud-sdk/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

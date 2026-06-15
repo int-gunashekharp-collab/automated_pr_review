@@ -41,6 +41,7 @@ import metrics
 import outcomes
 import precision
 import proposer
+import scorecard
 import silver
 import synthetic
 import telemetry
@@ -403,9 +404,7 @@ def run_loop(*, max_iters=None, fresh=False, get_diff_fn=None, run_reviewer_fn=N
     _acquire_lock()
     atexit.register(_release_lock)  # safety net for crashes / sys.exit paths
     telemetry.phase("startup")
-    cases = dataset.load_cases()
-    if not cases:
-        sys.exit("no golden cases found — check evals/pr-review/golden.jsonl under MAESTRO_ROOT")
+    cases = dataset.load_cases()   # [] when golden is absent or LOOP_SILVER_PRIMARY (human-free mode)
 
     # silver cases carry their FROZEN diff inline; golden cases fetch via gh.
     base_get_diff = get_diff_fn or hb.get_diff
@@ -418,6 +417,15 @@ def run_loop(*, max_iters=None, fresh=False, get_diff_fn=None, run_reviewer_fn=N
         print(f"eval set: {len(cases)} golden + {len(silver_cases)} silver "
               f"(self-grown from resolved human comments)", flush=True)
     cases = cases + silver_cases
+    if not cases:
+        # Human-free mode runs on silver alone; if neither source has cases there
+        # is nothing to measure against — guide the operator instead of crashing.
+        _release_lock()
+        if config.SILVER_PRIMARY:
+            sys.exit("LOOP_SILVER_PRIMARY is set but the silver eval is empty — seed it from "
+                     "your resolved PR comments first:  python3 loop.py --harvest-silver")
+        sys.exit("no eval cases — add a golden set (evals/pr-review/golden.jsonl under "
+                 "MAESTRO_ROOT), or run LOOP_SILVER_PRIMARY=1 after  python3 loop.py --harvest-silver")
 
     cases, dropped = dataset.prefetch_diffs(cases, eff_get_diff)
     if dropped:
@@ -516,6 +524,17 @@ def run_loop(*, max_iters=None, fresh=False, get_diff_fn=None, run_reviewer_fn=N
             fp_examples=fp_holder["examples"], consec_rejects=consec_rejects,
             synth_offset=synth_offset, shadow=shadow, calls_day=calls_day,
             silver_offset=silver_offset)
+
+    def _tick_scorecard():
+        """Publish the lifetime scorecard NOW (not only at run-end) so the
+        dashboard strip appears within a run and climbs live. Crash-proof."""
+        try:
+            scorecard.update(champion_eval, fp_rate=champ_fp,
+                             beyond_humans=outcomes.count_beyond_humans())
+        except Exception:  # noqa: BLE001 — a metric must never break the loop
+            pass
+
+    _tick_scorecard()   # right after baseline → the strip shows immediately
 
     limit = config.MAX_ITERS if max_iters is None else max_iters
     idx = 0
@@ -643,6 +662,7 @@ def run_loop(*, max_iters=None, fresh=False, get_diff_fn=None, run_reviewer_fn=N
                 fp_examples=fp_holder["examples"], consec_rejects=consec_rejects,
                 synth_offset=synth_offset, shadow=shadow, calls_day=calls_day,
                 silver_offset=silver_offset)
+        _tick_scorecard()   # keep the lifetime scorecard current every iteration
 
         # --- on promotion: refresh the human-reviewable adoption bundle ---
         # (after persist, so PROPOSAL.md reads the freshly written state)
@@ -659,6 +679,19 @@ def run_loop(*, max_iters=None, fresh=False, get_diff_fn=None, run_reviewer_fn=N
             telemetry.phase("idle", iter=idx,
                             resume_at=round(time.time() + config.MIN_ITER_GAP_SEC - dt, 1))
             time.sleep(config.MIN_ITER_GAP_SEC - dt)
+
+    # --- lifetime scorecard: fold this run into the OVERALL autonomy / hallucination
+    # trajectory (persisted across runs; crash-proof — never breaks the loop) ---
+    try:
+        sc = scorecard.update(champion_eval, fp_rate=champ_fp,
+                              beyond_humans=outcomes.count_beyond_humans())
+        if sc.get("autonomy_pct") is not None:
+            print(f"lifetime autonomy: {sc['autonomy_pct']}% "
+                  f"({sc['autonomous_now']}/{sc['human_flagged_total']} human-flagged patterns "
+                  f"caught unaided) · graduated {sc['graduated']} · beyond-humans "
+                  f"{sc['beyond_humans']}  →  python3 loop.py --scorecard", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"scorecard update skipped: {e}", flush=True)
 
     telemetry.phase("stopped", iter=idx)
     reporter.maybe_emit(force=True)
@@ -762,6 +795,8 @@ def main():
                     help="mine outcomes of the AI reviewer's comments on merged PRs")
     ap.add_argument("--replay", type=int, metavar="N", default=0,
                     help="review the last N merged PR diffs with BOTH live and champion skills")
+    ap.add_argument("--scorecard", action="store_true",
+                    help="print the lifetime autonomy/hallucination scorecard (overall, all runs)")
     args = ap.parse_args()
 
     if args.mine_outcomes:
@@ -829,6 +864,9 @@ def main():
         return None
     if args.list_history:
         return list_history()
+    if args.scorecard:
+        print(scorecard.format_scorecard())
+        return None
     if args.rollback:
         return do_rollback(args.rollback)
     run_loop(max_iters=1 if args.once else args.max_iters, fresh=args.fresh)

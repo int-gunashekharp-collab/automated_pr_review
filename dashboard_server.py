@@ -6,12 +6,11 @@ everything the loop emits (status.json heartbeat, thoughts.jsonl, ledger.jsonl,
 state.json, history/, champion-skill/, reports/) and a Server-Sent-Events
 stream that pushes a fresh snapshot whenever any of those files change.
 
-Read-only by design: it never writes to the loop workspace (demo mode writes
-only to its own temp directory) and never touches maestro-core.
+Read-only by design: it never writes to the loop workspace and never touches
+maestro-core. It only ever displays REAL data from the loop's workspace.
 
 Run:
     python3 dashboard_server.py            # watch the real loop workspace
-    python3 dashboard_server.py --demo     # synthetic live data (no loop, no Vertex)
     python3 dashboard_server.py --port 9000 --no-open
 """
 
@@ -19,8 +18,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import random
-import tempfile
 import threading
 import time
 import webbrowser
@@ -145,6 +142,9 @@ def _loop_config_snapshot():
         "beam_width": getattr(c, "BEAM_WIDTH", 1),
         "synth_every": getattr(c, "SYNTH_EVERY", 0),
         "max_calls_per_day": getattr(c, "MAX_CALLS_PER_DAY", 0),
+        "use_mcp": getattr(c, "USE_MCP", False),
+        "use_workflow": getattr(c, "USE_WORKFLOW", False),
+        "maestro_context": getattr(c, "MAESTRO_CONTEXT", False),
     }
 
 
@@ -196,6 +196,21 @@ def _ralph(ws: Path):
     return {"state": state, "events": events}
 
 
+def _scorecard(ws: Path):
+    """Lifetime scorecard trajectory (workspace/scorecard.jsonl): each line is one
+    run's computed metrics, so the latest line is current and the file is the
+    climbing-autonomy trend. None until the loop has recorded a run."""
+    rows = _tail_jsonl(ws / "scorecard.jsonl", 500)
+    if not rows:
+        return None
+    firsts = [r.get("autonomy_pct") for r in rows if r.get("autonomy_pct") is not None]
+    return {**rows[-1], "runs": len(rows),
+            "autonomy_first": firsts[0] if firsts else None,
+            "trajectory": [{"ts": r.get("ts"), "autonomy_pct": r.get("autonomy_pct"),
+                            "graduated": r.get("graduated"),
+                            "beyond_humans": r.get("beyond_humans")} for r in rows[-60:]]}
+
+
 def build_snapshot(P: Paths) -> dict:
     ws = P.workspace
     hist_dir = ws / "history"
@@ -204,6 +219,7 @@ def build_snapshot(P: Paths) -> dict:
         "demo": DEMO,
         "workspace": str(ws),
         "corpus_total": _corpus_total(),
+        "scorecard": _scorecard(ws),
         "ralph": _ralph(ws),
         "attempts": _attempts(ws),
         "silver": _silver(ws),
@@ -221,7 +237,8 @@ def build_snapshot(P: Paths) -> dict:
 def _watch_signature(P: Paths):
     sig = []
     for name in ("status.json", "thoughts.jsonl", "ledger.jsonl", "state.json",
-                 "attempts.jsonl", "silver.jsonl", "ralph.jsonl", "ralph_state.json"):
+                 "attempts.jsonl", "silver.jsonl", "ralph.jsonl", "ralph_state.json",
+                 "scorecard.jsonl"):
         f = P.workspace / name
         try:
             st = f.stat()
@@ -290,387 +307,30 @@ class Handler(BaseHTTPRequestHandler):
             return
 
 
-# --- demo mode -----------------------------------------------------------------
+# --- legacy flags: demo mode was removed; kept False/None so the snapshot always
+# reads as a live, real-data view ------------------------------------------------
 DEMO = False
 DEMO_CFG = None
 
-_DEMO_PATTERNS = [
-    ("missing idempotency keys on retried POST handlers",
-     "Flag POST/PUT handlers wrapped in retry decorators that lack an idempotency key — "
-     "duplicate side effects on retry.", "references/api-conventions.md", [4811, 4847, 4903]),
-    ("enum imported but raw string literals still compared",
-     "Flag comparisons against raw string literals where a domain enum exists for the value — "
-     "silent breakage when the enum value changes.", "references/code-style.md", [4712, 4790]),
-    ("unbounded queries feeding list endpoints",
-     "Flag ORM queries without LIMIT/pagination that feed list endpoints — memory blowups on "
-     "production-size tables.", "references/db.md", [4655, 4699, 4734]),
-    ("timezone-naive datetime arithmetic",
-     "Flag datetime.now() (naive) mixed with timezone-aware columns — off-by-5h30 bugs in "
-     "scheduling paths.", "references/datetime.md", [4520, 4561]),
-    ("exceptions swallowed inside worker tasks",
-     "Flag bare except blocks in celery/queue workers that log nothing — silent job loss.",
-     "references/workers.md", [4490, 4533, 4578]),
-    ("N+1 lookups inside serializer loops",
-     "Flag per-item relation access inside serializer loops without select_related/prefetch — "
-     "N+1 under load.", "references/db.md", [4401, 4456]),
-]
-
-
-def _demo_thought(kind, topic, rule, file, prs, comments=None):
-    if kind == "corpus":
-        prompt_head = ("You maintain the maestro-core PR-review conventions skill.\n"
-                       "Below: (1) the FULL current skill and (2) real human review comments "
-                       f"mined from this team's merged PRs… [{comments} comments in batch]")
-        resp = {"rationale": f"humans repeatedly flag {topic} "
-                             f"(PRs {', '.join('#' + str(p) for p in prs)}; "
-                             f"{len(prs)}/{len(prs)} resolved) — adding one generalised rule",
-                "edits": [{"file": file, "action": "append", "content": f"**{rule}**"}]}
-    elif kind == "consolidate":
-        prompt_head = ("You maintain the maestro-core PR-review conventions skill. It has grown "
-                       "and needs to be more concise WITHOUT losing any rule…")
-        resp = {"rationale": "merged 3 overlapping db rules; tightened severity prose",
-                "edits": [{"file": "references/db.md", "action": "rewrite",
-                           "content": "(consolidated db rules…)"}]}
-    else:
-        prompt_head = ("You maintain the maestro-core PR-review conventions skill. An eval ran "
-                       "the reviewer over historical PRs with known, human-verified bugs. "
-                       "Below: the TRAIN bugs the reviewer MISSED…")
-        resp = {"rationale": f"reviewer misses {topic} — naming the exact mechanism so it "
-                             "transfers to unseen code",
-                "edits": [{"file": file, "action": "append", "content": f"**{rule}**"}]}
-    return prompt_head, json.dumps(resp, indent=2)
-
-
-def run_demo_writer(ws: Path, speed: float):
-    """Simulate a running loop by writing the SAME files the real loop writes."""
-    rng = random.Random(11)
-    golden = [f"g{i:02d}" for i in range(1, 19)]
-    sids = ["s4811", "s4655", "s4520"]
-    ids = golden + sids
-    val_ids = ["g03", "g07", "g09", "g12", "g15", "g17", "s4520"]
-    train_ids = [i for i in ids if i not in val_ids]
-    passing = set(rng.sample(golden, 11)) | {"s4811"}
-    sil_meta = [
-        ("s4811", 4811, "retried POST handler lacks an idempotency key — duplicate side effects",
-         ["idempotency", "retry"], "high", .91),
-        ("s4655", 4655, "list endpoint query has no LIMIT/pagination — unbounded result set",
-         ["pagination", "unbounded"], "high", .87),
-        ("s4520", 4520, "naive datetime mixed with tz-aware column in scheduler math",
-         ["timezone", "naive datetime"], "medium", .82),
-    ]
-    (ws / "silver.jsonl").write_text("\n".join(json.dumps({
-        "id": i, "pr": pr, "path": f"src/app/{i}.py", "bug": bug,
-        "must_match_any": kws, "severity": sev, "confidence": conf,
-        "diff": f"diff --git a/src/app/{i}.py b/src/app/{i}.py\n@@ demo hunk @@\n",
-        "human_said": bug, "src_fp": f"{pr}|demo", "status": "active",
-        "added_ts": round(time.time(), 3), "baseline_passed": i == "s4811"})
-        for i, pr, bug, kws, sev, conf in sil_meta) + "\n")
-    size, budget, fp, noise = 14600, 60000, 0.0, 4.6
-    corpus_read, corpus_total = 0, 5349
-    consec, shadow = 0, None
-    totals = {"iters": 0, "accepts": 0, "rejects": 0, "errors": 0, "promotions": 0,
-              "consolidations": 0, "corpus_adds": 0, "model_calls": 0}
-    started = time.time()
-    seq = 0
-    (ws / "history").mkdir(parents=True, exist_ok=True)
-
-    def s(x):
-        time.sleep(max(0.05, x * speed))
-
-    def write_champion():
-        d = ws / "champion-skill"
-        (d / "references").mkdir(parents=True, exist_ok=True)
-        parts = {"SKILL.md": .18, "references/db.md": .27,
-                 "references/api-conventions.md": .21, "references/datetime.md": .12,
-                 "references/workers.md": .13, "references/do-not-flag.md": .09}
-        for rel, frac in parts.items():
-            (d / rel).write_text("# demo rubric (synthetic)\n" +
-                                 "rule text " * max(1, int(size * frac) // 10))
-
-    def status(phase, **info):
-        nonlocal seq
-        seq += 1
-        d = {"phase": phase, **info, "ts": round(time.time(), 3), "seq": seq, "pid": 4242,
-             "loop_started": round(started, 3), "model": "gemini-3.1-pro-preview"}
-        tmp = ws / ".status.json.tmp"
-        tmp.write_text(json.dumps(d))
-        tmp.replace(ws / "status.json")
-        return d
-
-    def write_state(recall):
-        per_case = [{"id": i, "passed": i in passing,
-                     "findings_count": rng.randint(2, 7)} for i in ids]
-        missed = [{"id": i, "pr": 4000 + int(i[1:]), "path": f"src/app/{i}.py",
-                   "bug": "demo: known historical bug", "severity": "high"}
-                  for i in ids if i not in passing]
-        (ws / "state.json").write_text(json.dumps({
-            "champion_eval": {"recall": recall, "noise": round(noise, 2),
-                              "passed": len(passing), "scoreable": len(ids),
-                              "per_case": per_case, "missed": missed},
-            "champ_fp": fp, "champ_size": size, "corpus_offset": corpus_read,
-            "totals": totals, "train_ids": train_ids, "val_ids": val_ids,
-            "model": "gemini-3.1-pro-preview", "project": "snabbit-ai-productivity",
-            "shadow": shadow, "consec_rejects": consec,
-            "calls_day": {"day": time.strftime("%Y-%m-%d"),
-                          "calls": totals["model_calls"]},
-            "beyond_humans": 142}))
-
-    def thought(kind, topic, rule, file, prs, comments=None):
-        ph, rh = _demo_thought(kind, topic, rule, file, prs, comments)
-        rec = {"ts": round(time.time(), 3), "kind": kind, "prompt_chars": rng.randint(38000, 52000),
-               "response_chars": len(rh), "prompt_head": ph, "response_head": rh}
-        if comments:
-            rec["comments"] = comments
-        with (ws / "thoughts.jsonl").open("a") as fh:
-            fh.write(json.dumps(rec) + "\n")
-
-    def ledger(rec):
-        rec.setdefault("ts", round(time.time(), 3))
-        with (ws / "ledger.jsonl").open("a") as fh:
-            fh.write(json.dumps(rec) + "\n")
-
-    # --- builder (ralph) demo: roadmap + per-story change events with diffs ---
-    RALPH_STORIES = [
-        ("S1", "Outcome mining: harvest production shadow-review outcomes"),
-        ("S2", "Outcome feedback: dismissed → do-not-flag, acted-on misses → propose"),
-        ("S3", "Caught-beyond-humans counter"),
-        ("S4", "Counterfactual replay: champion vs live skill on recent merged PRs"),
-        ("S5", "Severity-weighted recall (reported, not gating)"),
-        ("S6", "Rubric routing by changed-file paths (behind LOOP_ROUTING=1)"),
-    ]
-    ralph_titles = dict(RALPH_STORIES)
-    ralph_done = [0]
-
-    def _ddiff(path, body):
-        lines = body.strip("\n").split("\n")
-        return "\n".join([f"--- a/{path}", f"+++ b/{path}",
-                          f"@@ -0,0 +1,{len(lines)} @@"] + ["+" + l for l in lines])
-
-    RALPH_FILES = {
-        "S1": [("outcomes.py", "create", _ddiff("outcomes.py",
-                "import json, subprocess\n\nLOOP_AI_REVIEWER_LOGIN = 'maestro-ai[bot]'\n\n"
-                "def mine_outcomes(prs=30, _gh=None):\n"
-                "    \"\"\"Classify the AI reviewer's comments on merged PRs.\"\"\"\n"
-                "    out = []\n    for pr in _recent_merged(prs, _gh):\n"
-                "        for c in _ai_comments(pr):\n"
-                "            out.append({'pr': pr, 'verdict': _classify(c)})\n    return out")),
-               ("smoke_test.py", "append",
-                "--- a/smoke_test.py\n+++ b/smoke_test.py\n@@ +1,5 @@\n"
-                "+    outs = outcomes.mine_outcomes(prs=2, _gh=stub_gh)\n"
-                "+    assert {o['verdict'] for o in outs} <= {'acted_on','dismissed','unknown'}\n"
-                "+    assert len(outs) == len({o['pr'] for o in outs})  # dedupe\n"
-                "+    print('  [PASS] S1 outcome mining classify + dedupe')")],
-        "S2": [("proposer.py", "append", _ddiff("proposer.py",
-                "def outcome_inputs(outcomes):\n"
-                "    \"\"\"dismissed → subtraction pressure; acted-on misses → propose.\"\"\"\n"
-                "    return {'do_not_flag': [o for o in outcomes if o['verdict']=='dismissed']}"))],
-    }
-
-    def write_ralph_state(building, done):
-        stories = []
-        for k, (sid, title) in enumerate(RALPH_STORIES):
-            stt = "done" if k < done else "building" if sid == building else "pending"
-            stories.append({"id": sid, "priority": k + 1, "title": title, "status": stt})
-        rst = {"ts": round(time.time(), 3), "model": "gemini-3.1-pro-preview",
-               "project": "snabbit-ai-productivity", "running": True,
-               "iteration": done + (1 if building else 0), "max_iters": 6,
-               "phase": "ralph-build" if building else "ralph-idle",
-               "current": building, "done": done, "total": len(RALPH_STORIES),
-               "stories": stories}
-        tmp = ws / ".ralph_state.json.tmp"
-        tmp.write_text(json.dumps(rst))
-        tmp.replace(ws / "ralph_state.json")
-
-    def ralph_event(sid, result, files, note, commit, it):
-        changes = []
-        for path, action, diff in files:
-            dl = diff.split("\n")
-            changes.append({"path": path, "action": action,
-                            "added": sum(1 for l in dl if l.startswith("+") and not l.startswith("+++")),
-                            "removed": sum(1 for l in dl if l.startswith("-") and not l.startswith("---")),
-                            "diff": diff})
-        rec = {"ts": round(time.time(), 3), "iteration": it, "story": sid,
-               "title": ralph_titles[sid], "result": result, "done": result == "green",
-               "changes": changes, "note": note, "commit": commit, "refines": 0, "detail": ""}
-        with (ws / "ralph.jsonl").open("a") as fh:
-            fh.write(json.dumps(rec) + "\n")
-
-    def advance_ralph(it):
-        order = [sid for sid, _ in RALPH_STORIES]
-        done = ralph_done[0]
-        if done >= len(order) or it == 0 or it % 4 != 0:
-            return
-        sid = order[done]
-        files = RALPH_FILES.get(sid, [(f"{sid.lower()}_feature.py", "create",
-                _ddiff(f"{sid.lower()}_feature.py", f"# {sid} (demo)\nENABLED = True"))])
-        ralph_event(sid, "green", files, f"{sid} shipped; offline smoke green",
-                    f"{(it * 7) & 0xfffffff:07x}", it)
-        ralph_done[0] = done + 1
-        nxt = order[done + 1] if done + 1 < len(order) else None
-        write_ralph_state(nxt, done + 1)
-
-    # seed: S1 already done (with a real change event), S2 building
-    ralph_event("S1", "green", RALPH_FILES["S1"],
-                "outcomes.py + offline smoke checks; green", "a1b2c3d", 0)
-    ralph_done[0] = 1
-    write_ralph_state("S2", 1)
-
-    status("startup")
-    write_champion()
-    write_state(round(len(passing) / len(ids), 3))
-    it = 0
-    while True:
-        it += 1
-        advance_ralph(it)
-        kind = ("consolidate" if it % 5 == 0 else "corpus" if it % 2 == 0 else "propose")
-        topic, rule, file, prs = _DEMO_PATTERNS[(it // 2) % len(_DEMO_PATTERNS)]
-        if it == 2:
-            ledger({"iter": it, "kind": "silver-harvest", "status": "info",
-                    "reason": "eval set grew: +3 silver case(s)",
-                    "rationale": ", ".join(sids),
-                    "eval_set": {"golden": 18, "silver": 3},
-                    "cases": {sid: (sid in passing) for sid in sids}})
-        status("plan", iter=it, kind=kind); s(1.2)
-        batch = 0
-        if kind == "corpus":
-            batch = min(120, corpus_total - corpus_read)
-            status("extract", iter=it, kind=kind, offset=corpus_read, batch=batch); s(1.5)
-            corpus_read += batch
-        status("proposing", iter=it, kind=kind); s(rng.uniform(4, 7))
-        thought(kind, topic, rule, file, prs, comments=batch or None)
-        totals["model_calls"] += 1
-        if kind == "propose":
-            status("screening", iter=it, kind=kind, cases=8)
-            for ci in range(1, 9):
-                status("screening", iter=it, kind=kind, cases=8,
-                       eval={"label": f"i{it}-screen", "case": ids[ci - 1], "case_idx": ci,
-                             "n_cases": 8, "trial": 1, "trials": 1})
-                s(0.35)
-            totals["model_calls"] += 8
-        status("confirming", iter=it, kind=kind, cases=18, trials=3)
-        for ci, cid in enumerate(ids, 1):
-            for t in range(1, 4):
-                status("confirming", iter=it, kind=kind, cases=18, trials=3,
-                       eval={"label": f"i{it}-confirm", "case": cid, "case_idx": ci,
-                             "n_cases": 18, "trial": t, "trials": 3})
-                s(0.16)
-        totals["model_calls"] += 54
-        if it % 3 == 0:
-            status("precision", iter=it, kind=kind); s(2.0)
-            totals["model_calls"] += 4
-        status("deciding", iter=it, kind=kind); s(0.8)
-
-        roll = rng.random()
-        accept = roll < (0.45 if kind != "consolidate" else 0.6)
-        cases_map = {i: (i in passing) for i in ids}
-        delta_txt = ""
-        if accept:
-            if kind == "consolidate":
-                size = max(11000, size - rng.randint(1500, 2600))
-                delta_txt = "consolidated: shrunk, recall held"
-            else:
-                gain = [i for i in ids if i not in passing]
-                if gain and rng.random() < 0.7:
-                    won = rng.choice(gain)
-                    passing.add(won)
-                    cases_map[won] = True
-                    delta_txt = f"caught ['{won}']"
-                else:
-                    delta_txt = "incorporated human-review pattern (no regression)"
-                size += rng.randint(280, 520)
-            totals["accepts"] += 1; totals["promotions"] += 1
-            if kind == "corpus":
-                totals["corpus_adds"] += 1
-            if kind == "consolidate":
-                totals["consolidations"] += 1
-            recall = round(len(passing) / len(ids), 3)
-            (ws / "history" / f"{it:04d}-r{recall}").mkdir(exist_ok=True)
-        else:
-            reasons = ["no new train bug caught", "regressed ['g05']",
-                       "noise grew on already-passing cases",
-                       f"precision worse (FP {round(fp + 0.05, 2)} > {fp})",
-                       "no clear new pattern in this batch"]
-            delta_txt = rng.choice(reasons)
-            totals["rejects"] += 1
-        totals["iters"] += 1
-        recall = round(len(passing) / len(ids), 3)
-        tr = round(sum(i in passing for i in train_ids) / len(train_ids), 3)
-        vr = round(sum(i in passing for i in val_ids) / len(val_ids), 3)
-        noise = max(3.0, min(7.0, noise + rng.uniform(-0.2, 0.25)))
-        if it % 3 == 0:
-            fp = round(max(0.0, min(0.25, fp + rng.uniform(-0.04, 0.05))), 3)
-        ledger({"iter": it, "kind": kind, "status": "accepted" if accept else "rejected",
-                "rationale": f"{topic} (PRs {', '.join('#' + str(p) for p in prs)})",
-                "reason": delta_txt, "changelog": [f"append +6 lines -> {file}"],
-                "size": size, "champ_recall": recall, "model_calls": 63,
-                "cand_recall": recall, "cand_noise": round(noise, 2),
-                "train_recall": tr, "val_recall": vr,
-                "fp_rate": fp if it % 3 == 0 else None, "cases": cases_map})
-        with (ws / "attempts.jsonl").open("a") as fh:
-            fh.write(json.dumps({"ts": round(time.time(), 3), "iter": it, "kind": kind,
-                                 "fp": f"{rng.getrandbits(64):016x}",
-                                 "rationale": topic,
-                                 "status": "accepted" if accept else "rejected",
-                                 "reason": delta_txt}) + "\n")
-        status("decided", iter=it, kind=kind,
-               status="accepted" if accept else "rejected", reason=delta_txt)
-        consec = 0 if accept else consec + 1
-        if accept:
-            status("exporting", iter=it); s(0.9)
-            write_champion()
-        if it % 4 == 0:
-            status("shadow-eval", iter=it, cases=12); s(2.2)
-            sh = round(min(0.72, 0.40 + 0.015 * it + rng.uniform(-0.03, 0.03)), 3)
-            caught = round(sh * 12)
-            shadow = {"shadow_recall": sh, "caught": caught, "checked": 12, "errored": 0,
-                      "total_pool": 1487, "cursor": (it // 4) * 12,
-                      "ts": round(time.time(), 3),
-                      "misses": [{"id": f"syn-46{it % 90:02d}{i}", "pr": 4600 + i,
-                                  "human_said": "race window between check and insert — "
-                                                "use upsert with a unique constraint",
-                                  "keywords": ["upsert", "unique_constraint"]}
-                                 for i in range(min(3, 12 - caught))]}
-        write_state(recall)
-        s(1.0)
-        status("idle", iter=it, resume_at=round(time.time() + 3 * speed, 1)); s(3.0)
-
-
 # --- main -----------------------------------------------------------------------
 def main():
-    global DEMO, DEMO_CFG
     ap = argparse.ArgumentParser(description="PR-reviewer loop dashboard")
     ap.add_argument("--port", type=int, default=None,
                     help="default: LOOP_DASH_PORT from config (8123), else 8765")
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--demo", action="store_true", help="synthetic live data (no loop needed)")
-    ap.add_argument("--speed", type=float, default=1.0, help="demo pacing multiplier")
     ap.add_argument("--workspace", default=None, help="override workspace dir to watch")
     ap.add_argument("--no-open", action="store_true")
     args = ap.parse_args()
 
-    if args.demo:
-        DEMO = True
-        ws = Path(tempfile.mkdtemp(prefix="loop-dash-demo-"))
-        DEMO_CFG = {"max_skill_chars": 60000, "noise_tolerance": 0.10, "confirm_trials": 3,
-                    "screen_trials": 1, "precision_every": 3, "precision_tol": 0.0,
-                    "corpus_every": 2, "corpus_batch": 120, "consolidate_every": 5,
-                    "val_fraction": 0.33, "model": "gemini-3.1-pro-preview",
-                    "project": "snabbit-ai-productivity", "maestro_root": "(demo)",
-                    "plateau_iters": 6, "beam_width": 2, "synth_every": 4,
-                    "max_calls_per_day": 0}
-        P = Paths(ws, ws)
-        threading.Thread(target=run_demo_writer, args=(ws, args.speed), daemon=True).start()
-        print(f"DEMO mode — synthetic data in {ws}")
+    if args.workspace:
+        ws = Path(args.workspace).expanduser().resolve()
+    elif loop_config is not None:
+        ws = loop_config.WORKSPACE
     else:
-        if args.workspace:
-            ws = Path(args.workspace).expanduser().resolve()
-        elif loop_config is not None:
-            ws = loop_config.WORKSPACE
-        else:
-            ws = LOOP_DIR / "workspace"
-        reports = loop_config.REPORTS_DIR if loop_config is not None else LOOP_DIR / "reports"
-        P = Paths(ws, reports)
-        print(f"watching workspace: {ws}")
+        ws = LOOP_DIR / "workspace"
+    reports = loop_config.REPORTS_DIR if loop_config is not None else LOOP_DIR / "reports"
+    P = Paths(ws, reports)
+    print(f"watching workspace: {ws}")
 
     Handler.paths = P
     port = args.port or (getattr(loop_config, "DASH_PORT", 8765) if loop_config else 8765)

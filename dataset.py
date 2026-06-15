@@ -15,6 +15,11 @@ import config
 
 
 def load_cases() -> list[dict]:
+    """Load the human-curated golden set. Returns [] — without error — when
+    LOOP_SILVER_PRIMARY is set (human-free mode) or the golden file is absent;
+    the loop then runs on the resolution-derived silver eval alone."""
+    if config.SILVER_PRIMARY or not config.GOLDEN_FILE.exists():
+        return []
     lines = config.GOLDEN_FILE.read_text().splitlines()
     cases = [json.loads(l) for l in lines if l.strip()]
     if config.MAX_CASES > 0:
