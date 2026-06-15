@@ -13,6 +13,7 @@ graded on — not a fork that could drift.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -59,6 +60,70 @@ get_diff = H.get_diff
 load_skill = H.load_skill
 build_prompt = H.build_prompt
 score = H.score
+
+
+def load_routed_skill(skill_dir: Path, diff: str) -> str:
+    """Load only the reference files that match the files in the diff.
+    If routing.json exists in skill_dir, use it; else load everything (back-compat)."""
+    sk = (skill_dir / "SKILL.md").read_text()
+    parts = [sk]
+
+    routing_file = skill_dir / "routing.json"
+    routing = {}
+    if routing_file.exists():
+        try:
+            routing = json.loads(routing_file.read_text())
+        except Exception:
+            pass
+
+    ref_dir = skill_dir / "references"
+    all_refs = sorted(ref_dir.glob("*.md")) if ref_dir.exists() else []
+
+    if not config.LOOP_ROUTING or not routing:
+        for f in all_refs:
+            parts.append(f.read_text())
+        return "\n\n".join(parts)
+
+    # LOOP_ROUTING=1 and routing map exists.
+    changed_files = set()
+    for line in diff.splitlines():
+        if line.startswith("--- a/") or line.startswith("+++ b/"):
+            path = line[6:].strip()
+            if path:
+                changed_files.add(path)
+
+    to_load = set()
+    core = routing.get("core", [])
+    map_ = routing.get("map", {})
+
+    # always include core files
+    for pattern in core:
+        for f in all_refs:
+            if fnmatch.fnmatch(f.name, pattern):
+                to_load.add(f)
+
+    # include files matching the changed paths
+    for path in changed_files:
+        for pattern, refs in map_.items():
+            if fnmatch.fnmatch(path, pattern):
+                for ref_pat in refs:
+                    for f in all_refs:
+                        if fnmatch.fnmatch(f.name, ref_pat):
+                            to_load.add(f)
+
+    # any file not in core or map is also considered core for safety
+    mapped_refs = set(core)
+    for refs in map_.values():
+        mapped_refs.update(refs)
+    for f in all_refs:
+        is_mapped = any(fnmatch.fnmatch(f.name, p) for p in mapped_refs)
+        if not is_mapped:
+            to_load.add(f)
+
+    for f in sorted(list(to_load), key=lambda x: x.name):
+        parts.append(f.read_text())
+
+    return "\n\n".join(parts)
 
 
 def default_run_reviewer(prompt: str, prompt_file: Path) -> str:
@@ -127,13 +192,19 @@ def evaluate(skill_dir: Path, cases: list[dict], *, label: str, trials: int = 1,
     """
     get_diff_fn = get_diff_fn or get_diff
     run_reviewer_fn = run_reviewer_fn or default_run_reviewer
-    skill_text = load_skill(base=skill_dir)
+
+    # We load skill_text per case if routing is enabled, otherwise once here.
+    skill_text_global = load_skill(base=skill_dir) if not config.LOOP_ROUTING else None
 
     # --- per-case checkpointing: a crash/restart never re-buys finished work.
     # Rows are keyed by a fingerprint of the EXACT skill text (+ trial count),
     # so results can only ever be reused for the identical rubric.
     n_trials = max(1, trials)
-    fp = hashlib.sha256(skill_text.encode()).hexdigest()[:12]
+    # Use skill_text_global for the fingerprint if available, else load_skill.
+    # When routing is on, the fingerprint is of the WHOLE skill, even though
+    # per-case loads are routed. This ensures a change to any ref file busts the cache.
+    _fp_text = skill_text_global or load_skill(base=skill_dir)
+    fp = hashlib.sha256(_fp_text.encode()).hexdigest()[:12]
     config.EVAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     ck = config.EVAL_CACHE_DIR / f"{label}.jsonl"
     done: dict = {}
@@ -156,7 +227,8 @@ def evaluate(skill_dir: Path, cases: list[dict], *, label: str, trials: int = 1,
         if prev is not None:
             reused += 1
             per_case.append({"id": case["id"], "passed": prev["passed"],
-                             "findings_count": prev["findings_count"]})
+                             "findings_count": prev["findings_count"],
+                             "severity": prev.get("severity", "high")})
             noise_samples.append(prev["findings_count"])
             if prev["passed"]:
                 passed += 1
@@ -169,6 +241,7 @@ def evaluate(skill_dir: Path, cases: list[dict], *, label: str, trials: int = 1,
             continue
         try:
             diff = get_diff_fn(case)
+            skill_text = load_routed_skill(skill_dir, diff) if config.LOOP_ROUTING else skill_text_global
             prompt = build_prompt(diff, skill_text, config.USE_MCP, config.USE_WORKFLOW)
             votes, findings, last_out = [], [], ""
             for t in range(n_trials):
@@ -189,7 +262,8 @@ def evaluate(skill_dir: Path, cases: list[dict], *, label: str, trials: int = 1,
 
         case_passed = sum(votes) * 2 > len(votes)
         fc = round(statistics.mean(findings))
-        per_case.append({"id": case["id"], "passed": case_passed, "findings_count": fc})
+        per_case.append({"id": case["id"], "passed": case_passed, "findings_count": fc,
+                         "severity": case.get("severity", "high")})
         noise_samples.append(fc)
         if case_passed:
             passed += 1

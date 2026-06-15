@@ -56,6 +56,21 @@ def split_recall(ev: dict, ids: set[str]) -> float | None:
     return round(sum(bool(r.get("passed")) for r in rows) / len(rows), 3)
 
 
+def weighted_recall(ev: dict, id_to_sev: dict[str, str], weights: dict[str, float]) -> float | None:
+    """Recall weighted by case severity. critical=4, high=3, medium=2, low=1."""
+    rows = [r for r in ev.get("per_case", []) if "error" not in r]
+    if not rows:
+        return None
+    total_w = sum_passed_w = 0.0
+    for r in rows:
+        sev = str(id_to_sev.get(r["id"], r.get("severity", "high"))).lower()
+        w = weights.get(sev, weights.get("high", 3.0))
+        total_w += w
+        if r.get("passed"):
+            sum_passed_w += w
+    return round(sum_passed_w / total_w, 3) if total_w > 0 else None
+
+
 def regressions(champ: dict, cand: dict) -> set[str]:
     """Cases the champion caught that the candidate now explicitly misses."""
     return passing_ids(champ) & failed_ids(cand)
@@ -75,11 +90,33 @@ def subset_noise(ev: dict, ids: set[str]) -> float:
     return sum(vals) / len(vals) if vals else 0.0
 
 
-def skill_size(skill_dir: Path) -> int:
-    total = len((skill_dir / "SKILL.md").read_text())
-    for f in (skill_dir / "references").glob("*.md"):
-        total += len(f.read_text())
-    return total
+def skill_size(skill_dir: Path, routed: bool = False, cases: list[dict] | None = None,
+               get_diff_fn=None) -> int:
+    """Calculates skill size. If routed=True, returns the MAX routed size over
+    all given cases (the worst-case prompt size)."""
+    if not routed:
+        total = len((skill_dir / "SKILL.md").read_text())
+        ref_dir = skill_dir / "references"
+        if ref_dir.exists():
+            for f in ref_dir.glob("*.md"):
+                total += len(f.read_text())
+        return total
+
+    # Routed size: max over cases.
+    if not cases:
+        return skill_size(skill_dir, routed=False)
+
+    import harness_bridge as hb
+    mx = 0
+    for case in cases:
+        try:
+            diff = get_diff_fn(case) if get_diff_fn else case.get("diff", "")
+            sz = len(hb.load_routed_skill(skill_dir, diff))
+            if sz > mx:
+                mx = sz
+        except Exception:
+            continue
+    return mx
 
 
 def decide(*, kind: str, champ: dict, cand: dict, train_ids: set[str],

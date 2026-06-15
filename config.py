@@ -105,6 +105,12 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-pro-preview")
 
 # --- dataset / overfitting controls ----------------------------------------
 VAL_FRACTION = _f("LOOP_VAL_FRACTION", 0.33)
+SEV_WEIGHTS = {
+    "critical": _f("LOOP_SEV_CRITICAL_WEIGHT", 4.0),
+    "high": _f("LOOP_SEV_HIGH_WEIGHT", 3.0),
+    "medium": _f("LOOP_SEV_MEDIUM_WEIGHT", 2.0),
+    "low": _f("LOOP_SEV_LOW_WEIGHT", 1.0),
+}
 SPLIT_SEED = _i("LOOP_SPLIT_SEED", 0)
 FORCE_VAL_IDS = _csv("LOOP_FORCE_VAL_IDS")
 MAX_CASES = _i("LOOP_MAX_CASES", 0)
@@ -203,3 +209,4 @@ SILVER_PRIMARY = _b("LOOP_SILVER_PRIMARY", False)
 # (the smoke test sets it) may harness_bridge fall back to stub_harness/.
 ALLOW_STUB = _b("LOOP_ALLOW_STUB", False)
 LOOP_OUTCOMES = _b("LOOP_OUTCOMES", False)
+LOOP_ROUTING = _b("LOOP_ROUTING", False)

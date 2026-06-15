@@ -57,6 +57,8 @@ def snapshot_skill(src: Path, dst: Path):
     shutil.copy2(src / "SKILL.md", dst / "SKILL.md")
     for f in (src / "references").glob("*.md"):
         shutil.copy2(f, dst / "references" / f.name)
+    if (src / "routing.json").exists():
+        shutil.copy2(src / "routing.json", dst / "routing.json")
 
 
 def ledger_append(rec: dict):
@@ -75,7 +77,7 @@ def snapshot_history(idx: int, recall) -> Path:
 
 def persist(champion_eval, champ_fp, champ_size, split, corpus_offset, totals, *,
             fp_examples=None, consec_rejects=0, synth_offset=0, shadow=None,
-            calls_day=None, silver_offset=0):
+            calls_day=None, silver_offset=0, weighted_recall=None):
     """Atomic state write (tmp + rename) — a crash mid-write can never leave a
     torn state.json behind. Also persists the FP memory, the plateau counter,
     the shadow-eval cursor and the daily call budget so restarts lose nothing."""
@@ -87,6 +89,7 @@ def persist(champion_eval, champ_fp, champ_size, split, corpus_offset, totals, *
         "fp_examples": fp_examples or [], "consec_rejects": consec_rejects,
         "synth_offset": synth_offset, "shadow": shadow, "calls_day": calls_day,
         "silver_offset": silver_offset,
+        "weighted_recall": weighted_recall,
         "beyond_humans": outcomes.count_beyond_humans(),
     }
     tmp = config.STATE_FILE.with_suffix(".json.tmp")
@@ -173,7 +176,8 @@ def _screen_candidate(idx, beam_i, patch, miss_ids, sample, cases, champion_eval
     Returns the screen verdict + stats; the caller picks the best of the beam."""
     snapshot_skill(config.CHAMPION_DIR, config.CANDIDATE_DIR)
     changelog = apply_patch(config.CANDIDATE_DIR, patch)
-    size_cand = metrics.skill_size(config.CANDIDATE_DIR)
+    size_cand = metrics.skill_size(config.CANDIDATE_DIR, routed=config.LOOP_ROUTING,
+                                   cases=cases, get_diff_fn=get_diff_fn)
     if size_cand > config.MAX_SKILL_CHARS:
         return {"ok": False, "why": f"screened out: skill {size_cand} > budget "
                                     f"{config.MAX_SKILL_CHARS}",
@@ -329,7 +333,8 @@ def run_iteration(idx, kind, cases, split, champion_eval, champ_fp, fp_holder,
             return champion_eval, champ_fp, False
 
     changelog = apply_patch(config.CANDIDATE_DIR, patch)
-    size_cand = metrics.skill_size(config.CANDIDATE_DIR)
+    size_cand = metrics.skill_size(config.CANDIDATE_DIR, routed=config.LOOP_ROUTING,
+                                   cases=cases, get_diff_fn=get_diff_fn)
     base = {"iter": idx, "kind": kind, "rationale": patch.get("rationale", "(none)"),
             "changelog": changelog, "size": size_cand, "champ_recall": champion_eval["recall"]}
     if kind == "propose" and dismissed_outcomes:
@@ -455,7 +460,7 @@ def run_loop(*, max_iters=None, fresh=False, get_diff_fn=None, run_reviewer_fn=N
         s = json.loads(config.STATE_FILE.read_text())
         champion_eval = s["champion_eval"]
         champ_fp = s.get("champ_fp")
-        champ_size = s.get("champ_size", metrics.skill_size(config.CHAMPION_DIR))
+        champ_size = s.get("champ_size", metrics.skill_size(config.CHAMPION_DIR, routed=config.LOOP_ROUTING, cases=cases, get_diff_fn=eff_get_diff))
         corpus_offset = s.get("corpus_offset", 0)
         totals_seed = s.get("totals")
         if s.get("train_ids") and s.get("val_ids"):
@@ -477,7 +482,8 @@ def run_loop(*, max_iters=None, fresh=False, get_diff_fn=None, run_reviewer_fn=N
         champion_eval = hb.evaluate(config.CHAMPION_DIR, cases, label="baseline",
                                     trials=config.CONFIRM_TRIALS, get_diff_fn=eff_get_diff,
                                     run_reviewer_fn=run_reviewer_fn)
-        champ_size = metrics.skill_size(config.CHAMPION_DIR)
+        champ_size = metrics.skill_size(config.CHAMPION_DIR, routed=config.LOOP_ROUTING,
+                                        cases=cases, get_diff_fn=eff_get_diff)
         champ_fp = None
         if config.PRECISION_EVERY > 0:
             telemetry.phase("precision", note="baseline FP measurement")
@@ -495,6 +501,7 @@ def run_loop(*, max_iters=None, fresh=False, get_diff_fn=None, run_reviewer_fn=N
               f"(train {metrics.split_recall(champion_eval, split[0])}, "
               f"val {metrics.split_recall(champion_eval, split[1])}), "
               f"noise {champion_eval['noise']}, FP {champ_fp}, "
+              f"size {champ_size}, "
               f"corpus {corpus_total} human comments", flush=True)
 
     # --- dead-eval guard: never burn iterations against a zero-information bar ---
@@ -520,10 +527,15 @@ def run_loop(*, max_iters=None, fresh=False, get_diff_fn=None, run_reviewer_fn=N
     if totals_seed:
         reporter.totals.update(totals_seed)
     reporter.maybe_emit(force=True)
+    # initial weighted recall
+    cases_by_id = {c["id"]: c for c in cases}
+    id_to_sev = {cid: c.get("severity", "high") for cid, c in cases_by_id.items()}
+    wr = metrics.weighted_recall(champion_eval, id_to_sev, config.SEV_WEIGHTS)
+
     persist(champion_eval, champ_fp, champ_size, split, corpus_offset, reporter.totals,
             fp_examples=fp_holder["examples"], consec_rejects=consec_rejects,
             synth_offset=synth_offset, shadow=shadow, calls_day=calls_day,
-            silver_offset=silver_offset)
+            silver_offset=silver_offset, weighted_recall=wr)
 
     def _tick_scorecard():
         """Publish the lifetime scorecard NOW (not only at run-end) so the
@@ -657,11 +669,16 @@ def run_loop(*, max_iters=None, fresh=False, get_diff_fn=None, run_reviewer_fn=N
             except Exception as e:
                 print(f"[iter {idx}] silver harvest error: {e}", flush=True)
 
-        persist(champion_eval, champ_fp, metrics.skill_size(config.CHAMPION_DIR),
+        # refresh weighted recall
+        cases_by_id = {c["id"]: c for c in cases}
+        id_to_sev = {cid: c.get("severity", "high") for cid, c in cases_by_id.items()}
+        wr = metrics.weighted_recall(champion_eval, id_to_sev, config.SEV_WEIGHTS)
+
+        persist(champion_eval, champ_fp, metrics.skill_size(config.CHAMPION_DIR, routed=config.LOOP_ROUTING, cases=cases, get_diff_fn=eff_get_diff),
                 split, corpus_offset, reporter.totals,
                 fp_examples=fp_holder["examples"], consec_rejects=consec_rejects,
                 synth_offset=synth_offset, shadow=shadow, calls_day=calls_day,
-                silver_offset=silver_offset)
+                silver_offset=silver_offset, weighted_recall=wr)
         _tick_scorecard()   # keep the lifetime scorecard current every iteration
 
         # --- on promotion: refresh the human-reviewable adoption bundle ---

@@ -94,6 +94,7 @@ def _prune_state(state):
         "model": state.get("model"), "project": state.get("project"),
         "shadow": state.get("shadow"), "consec_rejects": state.get("consec_rejects"),
         "calls_day": state.get("calls_day"),
+        "weighted_recall": state.get("weighted_recall"),
         "beyond_humans": state.get("beyond_humans", 0),
     }
 
