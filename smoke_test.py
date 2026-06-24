@@ -195,6 +195,21 @@ def main():
                              noise_tol=0.1, max_size=99999)[0]
     check("consolidation accepts smaller+equal-recall", cons_ok is True)
 
+    # severity-weighted recall
+    check("weighted recall (S5)",
+          metrics.weighted_recall(champ, {"aaa": "critical", "bbb": "low"},
+                                  {"critical": 4, "high": 3, "medium": 2, "low": 1}) == 1.0)
+
+    # routing (S6)
+    _dsav = config.LOOP_ROUTING
+    config.LOOP_ROUTING = True
+    (SEED / "routing.json").write_text(json.dumps({"core": ["db.md"], "map": {"src/a.py": ["aaa.md"]}}))
+    (SEED / "references" / "aaa.md").write_text("# aaa\nknows: aaa-pattern\n")
+    check("routing: load_routed_skill",
+          "aaa-pattern" in hb.load_routed_skill(SEED, "+++ b/src/a.py") and
+          "aaa-pattern" not in hb.load_routed_skill(SEED, "+++ b/src/other.py"))
+    config.LOOP_ROUTING = _dsav
+
     # liveness: a dead (all-errored) candidate eval must never promote
     dead = {"recall": None, "noise": 0.0, "passed": 0, "scoreable": 0, "errored": 2,
             "per_case": [{"id": "aaa", "passed": False, "error": "GOOGLE_CLOUD_PROJECT is not set"},

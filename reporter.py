@@ -151,16 +151,28 @@ class Reporter:
         traj = self._trajectory()
         att = attempts.stats()
         val_ci = metrics.fmt_ci(metrics.split_ci(champ, self.val_ids))
+        # weighted recall for champion
+        state = {}
+        if config.STATE_FILE.exists():
+            try:
+                state = json.loads(config.STATE_FILE.read_text())
+            except:
+                pass
+        wr = state.get("weighted_recall")
+
+        # routing tag
+        routing_tag = " [routed]" if config.LOOP_ROUTING else ""
+
         L += [
             "",
             "## Champion now (best rubric found so far)",
             f"- Overall recall: {self._d(champ.get('recall'), self.baseline['recall'])} "
-            f"({champ.get('passed')}/{champ.get('scoreable')})",
+            f"({champ.get('passed')}/{champ.get('scoreable')})" + (f" · weighted {wr}" if wr is not None else ""),
             f"- Train recall {tr} · **held-out val recall {vr}** "
             f"{val_ci + ' ' if val_ci else ''}(the honest number)",
             f"- Noise {champ.get('noise')} findings/review (baseline {self.baseline.get('noise')}) "
             f"· precision FP-rate {self.champ_fp if self.champ_fp is not None else 'n/a'}",
-            f"- Rubric size {self.champ_size} / {config.MAX_SKILL_CHARS} char budget",
+            f"- Rubric size {self.champ_size} / {config.MAX_SKILL_CHARS} char budget{routing_tag}",
             f"- Learning from humans: {self.totals['corpus_adds']} mined patterns incorporated "
             f"· {corp}",
         ]
